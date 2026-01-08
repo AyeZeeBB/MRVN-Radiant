@@ -314,7 +314,8 @@ void ApexLegends::EmitEntity(const entity_t &e) {
     if (striEqualPrefix(e.valueForKey("classname"), "light")
      || striEqualPrefix(e.valueForKey("classname"), "color")
      || striEqualPrefix(e.valueForKey("classname"), "fog")
-     || striEqualPrefix(e.valueForKey("classname"), "env")) {
+     || striEqualPrefix(e.valueForKey("classname"), "env")
+     || striEqualPrefix(e.valueForKey("classname"), "sky")) {
         Titanfall::Ent::env.insert(Titanfall::Ent::env.end(), str.begin(), str.end());
     // fx
     } else if(striEqualPrefix(e.valueForKey("classname"), "info_particle")) {

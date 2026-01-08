@@ -1764,7 +1764,7 @@ void Shaders_Load(){
 		StringOutputStream shadername( 256 );
 		for( const CopiedString& sh : l_shaderfiles )
 		{
-			LoadShaderFile( shadername( path, sh ) );
+			LoadShaderFile( shadername( path.c_str(), sh ) );
 		}
 	}
 

@@ -94,7 +94,8 @@ namespace {
     constexpr float MIN_TRIANGLE_AREA = 0.01f;
 
     // Vertex welding epsilon for snapping close vertices
-    constexpr float VERTEX_WELD_EPSILON = 0.05f;
+    // Increased from 0.05 to 0.25 to better handle corner cases
+    constexpr float VERTEX_WELD_EPSILON = 0.25f;
 
     /*
         CollLeafPoly_s - Polygon leaf structure (from IDA)
@@ -674,6 +675,23 @@ namespace {
     }
 
     /*
+        SnapVertexToGrid
+        Snaps a vertex to a fixed grid to eliminate floating point precision issues
+        This ensures that vertices that should be at the same position actually are
+        Grid size of 0.125 (1/8th unit) provides good precision while preventing cracks
+    */
+    Vector3 SnapVertexToGrid(const Vector3& vert) {
+        constexpr float GRID_SIZE = 0.125f;  // 1/8th unit grid
+        float invGrid = 1.0f / GRID_SIZE;
+
+        return Vector3(
+            std::round(vert.x() * invGrid) / invGrid,
+            std::round(vert.y() * invGrid) / invGrid,
+            std::round(vert.z() * invGrid) / invGrid
+        );
+    }
+
+    /*
         DistanceToSegmentSquared
         Returns squared distance from point to line segment
         Used for T-junction detection
@@ -704,12 +722,16 @@ namespace {
         WeldVertexWithTJunctions
         Snaps a vertex to nearby existing vertices OR to existing edges
         This properly eliminates T-junctions that cause players to get stuck
+        Now with grid snapping to eliminate floating point precision issues
     */
     Vector3 WeldVertexWithTJunctions(const Vector3& vert, std::vector<Vector3>& weldedVerts,
                                       std::vector<std::pair<Vector3, Vector3>>& weldedEdges) {
+        // First snap to grid to eliminate precision issues
+        Vector3 snappedVert = SnapVertexToGrid(vert);
+
         // First check if close to existing vertex
         for (const Vector3& existing : weldedVerts) {
-            float dist = vector3_length(vert - existing);
+            float dist = vector3_length(snappedVert - existing);
             if (dist < VERTEX_WELD_EPSILON) {
                 return existing;  // Snap to existing vertex
             }
@@ -718,7 +740,7 @@ namespace {
         // Check if close to any existing edge (T-junction elimination)
         float epsilonSquared = VERTEX_WELD_EPSILON * VERTEX_WELD_EPSILON;
         for (const auto& edge : weldedEdges) {
-            float distSq = DistanceToSegmentSquared(vert, edge.first, edge.second);
+            float distSq = DistanceToSegmentSquared(snappedVert, edge.first, edge.second);
             if (distSq < epsilonSquared) {
                 // Snap this vertex to the edge
                 // Project onto the line segment
@@ -727,11 +749,12 @@ namespace {
 
                 if (segLen < 0.0001f) {
                     // Degenerate edge, snap to start
-                    weldedVerts.push_back(edge.first);
-                    return edge.first;
+                    Vector3 snapped = SnapVertexToGrid(edge.first);
+                    weldedVerts.push_back(snapped);
+                    return snapped;
                 }
 
-                Vector3 toVert = vert - edge.first;
+                Vector3 toVert = snappedVert - edge.first;
                 Vector3 segDirNorm = segDir / segLen;
                 float projection = vector3_dot(toVert, segDirNorm);
 
@@ -739,15 +762,18 @@ namespace {
                 float clampedProjection = std::clamp(projection, 0.0f, segLen);
                 Vector3 closestPoint = edge.first + segDirNorm * clampedProjection;
 
+                // Snap the closest point to grid as well
+                closestPoint = SnapVertexToGrid(closestPoint);
+
                 // Add this new split point to vertices
                 weldedVerts.push_back(closestPoint);
                 return closestPoint;
             }
         }
 
-        // Not close to anything, add as new vertex
-        weldedVerts.push_back(vert);
-        return vert;
+        // Not close to anything, add as new vertex (already snapped)
+        weldedVerts.push_back(snappedVert);
+        return snappedVert;
     }
 
     /*
