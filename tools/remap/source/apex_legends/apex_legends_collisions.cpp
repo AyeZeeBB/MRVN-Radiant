@@ -93,10 +93,6 @@ namespace {
     // Minimum triangle area to prevent sliver triangles
     constexpr float MIN_TRIANGLE_AREA = 0.01f;
 
-    // Vertex welding epsilon for snapping close vertices
-    // Increased from 0.05 to 0.25 to better handle corner cases
-    constexpr float VERTEX_WELD_EPSILON = 0.25f;
-
     /*
         CollLeafPoly_s - Polygon leaf structure (from IDA)
         Used for types 5, 6, 7 (triangles, quads, and larger polys)
@@ -692,91 +688,6 @@ namespace {
     }
 
     /*
-        DistanceToSegmentSquared
-        Returns squared distance from point to line segment
-        Used for T-junction detection
-    */
-    float DistanceToSegmentSquared(const Vector3& point, const Vector3& segStart, const Vector3& segEnd) {
-        Vector3 segDir = segEnd - segStart;
-        float segLen = vector3_length(segDir);
-
-        if (segLen < 0.0001f) {
-            // Degenerate segment, return distance to endpoint
-            return vector3_length_squared(point - segStart);
-        }
-
-        Vector3 segDirNorm = segDir / segLen;
-        Vector3 toPoint = point - segStart;
-        float projection = vector3_dot(toPoint, segDirNorm);
-
-        // Clamp to segment endpoints
-        float clampedProjection = std::clamp(projection, 0.0f, segLen);
-
-        // Closest point on segment
-        Vector3 closestPoint = segStart + segDirNorm * clampedProjection;
-
-        return vector3_length_squared(point - closestPoint);
-    }
-
-    /*
-        WeldVertexWithTJunctions
-        Snaps a vertex to nearby existing vertices OR to existing edges
-        This properly eliminates T-junctions that cause players to get stuck
-        Now with grid snapping to eliminate floating point precision issues
-    */
-    Vector3 WeldVertexWithTJunctions(const Vector3& vert, std::vector<Vector3>& weldedVerts,
-                                      std::vector<std::pair<Vector3, Vector3>>& weldedEdges) {
-        // First snap to grid to eliminate precision issues
-        Vector3 snappedVert = SnapVertexToGrid(vert);
-
-        // First check if close to existing vertex
-        for (const Vector3& existing : weldedVerts) {
-            float dist = vector3_length(snappedVert - existing);
-            if (dist < VERTEX_WELD_EPSILON) {
-                return existing;  // Snap to existing vertex
-            }
-        }
-
-        // Check if close to any existing edge (T-junction elimination)
-        float epsilonSquared = VERTEX_WELD_EPSILON * VERTEX_WELD_EPSILON;
-        for (const auto& edge : weldedEdges) {
-            float distSq = DistanceToSegmentSquared(snappedVert, edge.first, edge.second);
-            if (distSq < epsilonSquared) {
-                // Snap this vertex to the edge
-                // Project onto the line segment
-                Vector3 segDir = edge.second - edge.first;
-                float segLen = vector3_length(segDir);
-
-                if (segLen < 0.0001f) {
-                    // Degenerate edge, snap to start
-                    Vector3 snapped = SnapVertexToGrid(edge.first);
-                    weldedVerts.push_back(snapped);
-                    return snapped;
-                }
-
-                Vector3 toVert = snappedVert - edge.first;
-                Vector3 segDirNorm = segDir / segLen;
-                float projection = vector3_dot(toVert, segDirNorm);
-
-                // Clamp to segment and compute closest point
-                float clampedProjection = std::clamp(projection, 0.0f, segLen);
-                Vector3 closestPoint = edge.first + segDirNorm * clampedProjection;
-
-                // Snap the closest point to grid as well
-                closestPoint = SnapVertexToGrid(closestPoint);
-
-                // Add this new split point to vertices
-                weldedVerts.push_back(closestPoint);
-                return closestPoint;
-            }
-        }
-
-        // Not close to anything, add as new vertex (already snapped)
-        weldedVerts.push_back(snappedVert);
-        return snappedVert;
-    }
-
-    /*
         ComputeBoundsForTriangles
         Computes combined AABB for a set of triangles
     */
@@ -1073,18 +984,13 @@ namespace {
     /*
         CollectTrianglesFromMeshes
         Collects collision triangles from Shared::meshes
-        Filters out degenerate triangles and welds close vertices
-        Now includes T-junction elimination to prevent players getting stuck on edges
+        Filters out degenerate triangles
     */
     void CollectTrianglesFromMeshes() {
         g_collisionTris.clear();
 
-        // Track welded vertices AND edges for proper T-junction elimination
-        std::vector<Vector3> weldedVertices;
-        std::vector<std::pair<Vector3, Vector3>> weldedEdges;
         int skippedDegenerate = 0;
         int totalTris = 0;
-        int tJunctionsFixed = 0;
 
         for (const Shared::Mesh_t& mesh : Shared::meshes) {
             // Get content flags from shader
@@ -1109,28 +1015,9 @@ namespace {
                 totalTris++;
 
                 CollisionTri_t tri;
-                // Weld vertices with T-junction elimination
-                // This snaps vertices to nearby edges, preventing cracks
-                Vector3 origV0 = verts[indices[i]].xyz;
-                Vector3 origV1 = verts[indices[i + 1]].xyz;
-                Vector3 origV2 = verts[indices[i + 2]].xyz;
-
-                tri.v0 = WeldVertexWithTJunctions(origV0, weldedVertices, weldedEdges);
-                tri.v1 = WeldVertexWithTJunctions(origV1, weldedVertices, weldedEdges);
-                tri.v2 = WeldVertexWithTJunctions(origV2, weldedVertices, weldedEdges);
-
-                // Track if any vertex was snapped to an edge (T-junction fixed)
-                if (tri.v0 != origV0 || tri.v1 != origV1 || tri.v2 != origV2) {
-                    // Check if it was snapped to an edge (not just vertex welding)
-                    float distToV0 = vector3_length(tri.v0 - origV0);
-                    float distToV1 = vector3_length(tri.v1 - origV1);
-                    float distToV2 = vector3_length(tri.v2 - origV2);
-                    float maxDist = std::max({distToV0, distToV1, distToV2});
-
-                    if (maxDist > VERTEX_WELD_EPSILON * 0.5f) {
-                        tJunctionsFixed++;
-                    }
-                }
+                tri.v0 = verts[indices[i]].xyz;
+                tri.v1 = verts[indices[i + 1]].xyz;
+                tri.v2 = verts[indices[i + 2]].xyz;
 
                 // Compute normal
                 Vector3 edge1 = tri.v1 - tri.v0;
@@ -1151,24 +1038,6 @@ namespace {
                 tri.surfaceFlags = mesh.shaderInfo ? mesh.shaderInfo->surfaceFlags : 0;
 
                 g_collisionTris.push_back(tri);
-
-                // Add this triangle's edges to the welded edges list for T-junction detection
-                // Use consistent ordering (min vertex first) to avoid duplicates
-                auto addEdge = [&](const Vector3& a, const Vector3& b) {
-                    if (vector3_length(a - b) > VERTEX_WELD_EPSILON) {
-                        // Sort vertices to ensure consistent edge direction
-                        if (a.x() < b.x() || (a.x() == b.x() && a.y() < b.y()) ||
-                            (a.x() == b.x() && a.y() == b.y() && a.z() < b.z())) {
-                            weldedEdges.push_back({a, b});
-                        } else {
-                            weldedEdges.push_back({b, a});
-                        }
-                    }
-                };
-
-                addEdge(tri.v0, tri.v1);
-                addEdge(tri.v1, tri.v2);
-                addEdge(tri.v2, tri.v0);
             }
         }
 
@@ -1176,11 +1045,8 @@ namespace {
             Sys_FPrintf(SYS_VRB, "  Filtered %d degenerate triangles (%.1f%%)\n",
                        skippedDegenerate, 100.0f * skippedDegenerate / totalTris);
         }
-        if (tJunctionsFixed > 0) {
-            Sys_FPrintf(SYS_VRB, "  Fixed %d T-junctions (cracks in collision)\n", tJunctionsFixed);
-        }
-        Sys_Printf("  Collected %zu collision triangles (from %d total, %zu edges tracked)\n",
-                   g_collisionTris.size(), totalTris, weldedEdges.size());
+        Sys_Printf("  Collected %zu collision triangles (from %d total)\n",
+                   g_collisionTris.size(), totalTris);
     }
 
 }  // anonymous namespace
