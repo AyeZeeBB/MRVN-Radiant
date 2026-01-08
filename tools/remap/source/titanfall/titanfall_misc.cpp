@@ -267,5 +267,6 @@ void Titanfall::EmitEntityPartitions() {
         partitions += " spawn";
     }
 
-    Titanfall::Bsp::entityPartitions = { partitions.begin(), partitions.end() + 1 };
+    Titanfall::Bsp::entityPartitions = { partitions.begin(), partitions.end() };
+    Titanfall::Bsp::entityPartitions.push_back('\0');  // Add null terminator
 }

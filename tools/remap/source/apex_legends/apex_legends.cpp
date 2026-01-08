@@ -84,6 +84,7 @@ void WriteR5BSPFile(const char *filename) {
     AddLump(file, header.lumps[R5_LUMP_SURFACE_PROPERTIES],       ApexLegends::Bsp::surfaceProperties_stub);
     AddLump(file, header.lumps[R5_LUMP_BVH_NODES],                ApexLegends::Bsp::bvhNodes);
     AddLump(file, header.lumps[R5_LUMP_BVH_LEAF_DATA],            ApexLegends::Bsp::bvhLeafDatas);
+    AddLump(file, header.lumps[R5_LUMP_PACKED_VERTICES],          ApexLegends::Bsp::packedVertices);  // Collision vertices
     AddLump(file, header.lumps[R5_LUMP_ENTITY_PARTITIONS],        Titanfall::Bsp::entityPartitions);
     AddLump(file, header.lumps[R5_LUMP_VERTEX_NORMALS],           Titanfall::Bsp::vertexNormals);
 
@@ -122,8 +123,17 @@ void WriteR5BSPFile(const char *filename) {
     AddLump(file, header.lumps[R5_LUMP_VERTEX_LIT_BUMP],         ApexLegends::Bsp::vertexLitBumpVertices);
     AddLump(file, header.lumps[R5_LUMP_VERTEX_UNLIT_TS],         ApexLegends::Bsp::vertexUnlitTSVertices);
     AddLump(file, header.lumps[R5_LUMP_MESH_INDICES],            Titanfall::Bsp::meshIndices);
+
+    Sys_Printf("Writing MESHES lump: %zu meshes (%zu bytes)\n",
+        ApexLegends::Bsp::meshes.size(),
+        ApexLegends::Bsp::meshes.size() * sizeof(ApexLegends::Mesh_t));
     AddLump(file, header.lumps[R5_LUMP_MESHES],                  ApexLegends::Bsp::meshes);
+
     AddLump(file, header.lumps[R5_LUMP_MESH_BOUNDS],             Titanfall::Bsp::meshBounds);
+
+    Sys_Printf("Writing MATERIAL_SORT lump: %zu sorts (%zu bytes)\n",
+        ApexLegends::Bsp::materialSorts.size(),
+        ApexLegends::Bsp::materialSorts.size() * sizeof(ApexLegends::MaterialSort_t));
     AddLump(file, header.lumps[R5_LUMP_MATERIAL_SORT],           ApexLegends::Bsp::materialSorts);
     AddLump(file, header.lumps[R5_LUMP_LIGHTMAP_HEADERS],        ApexLegends::Bsp::lightmapHeaders_stub);      // stub
     AddLump(file, header.lumps[R5_LUMP_TWEAK_LIGHTS],            ApexLegends::Bsp::tweakLights_stub);          // stub
@@ -144,8 +154,17 @@ void WriteR5BSPFile(const char *filename) {
     Sys_Printf("Wrote %.1f MB (%d bytes)\n", (float)size / (1024 * 1024), size);
 
     /* write the completed header */
+    Sys_Printf("Writing header with MESHES lump offset=%d, length=%d\n",
+        header.lumps[R5_LUMP_MESHES].offset,
+        header.lumps[R5_LUMP_MESHES].length);
+    Sys_Printf("Writing header with MATERIAL_SORT lump offset=%d, length=%d\n",
+        header.lumps[R5_LUMP_MATERIAL_SORT].offset,
+        header.lumps[R5_LUMP_MATERIAL_SORT].length);
     fseek(file, 0, SEEK_SET);
     SafeWrite(file, &header, sizeof(header));
+
+    /* ensure all data is written to disk */
+    fflush(file);
 
     /* close the file */
     fclose(file);

@@ -56,11 +56,14 @@ void ApexLegends::EmitVisTree() {
     writes the mesh list to the bsp
 */
 void ApexLegends::EmitMeshes(const entity_t &e) {
+    Sys_Printf("  EmitMeshes: %zu meshes from Shared::meshes\n", Shared::meshes.size());
+
     for (const Shared::Mesh_t &mesh : Shared::meshes) {
         ApexLegends::Mesh_t &m = ApexLegends::Bsp::meshes.emplace_back();
         m.flags = mesh.shaderInfo->surfaceFlags;
         m.triOffset = Titanfall::Bsp::meshIndices.size();
         m.triCount = mesh.triangles.size() / 3;
+        memset(m.unknown, 0, sizeof(m.unknown));
 
         int vertexOffset;
         if (CHECK_FLAG(m.flags, S_VERTEX_LIT_BUMP)) {
@@ -70,9 +73,11 @@ void ApexLegends::EmitMeshes(const entity_t &e) {
         } else if (CHECK_FLAG(m.flags, S_VERTEX_UNLIT_TS)) {
             vertexOffset = ApexLegends::Bsp::vertexUnlitTSVertices.size();
         } else {
-            vertexOffset = ApexLegends::Bsp::vertexUnlitVertices.size();
-            m.flags |= S_VERTEX_UNLIT;
-            mesh.shaderInfo->surfaceFlags |= S_VERTEX_UNLIT;
+            // Default to LIT_BUMP for _wldc error material fallback (aspect 7)
+            // Using UNLIT would give _wldu error material (aspect 6)
+            vertexOffset = ApexLegends::Bsp::vertexLitBumpVertices.size();
+            m.flags |= S_VERTEX_LIT_BUMP;
+            mesh.shaderInfo->surfaceFlags |= S_VERTEX_LIT_BUMP;
         }
 
 
@@ -112,6 +117,8 @@ void ApexLegends::EmitMeshes(const entity_t &e) {
         mb.origin = (aabb.maxs + aabb.mins) / 2;
         mb.extents = (aabb.maxs - aabb.mins) / 2;
     }
+
+    Sys_Printf("  EmitMeshes: %zu meshes written to ApexLegends::Bsp::meshes\n", ApexLegends::Bsp::meshes.size());
 }
 
 
@@ -144,10 +151,14 @@ uint32_t ApexLegends::EmitTextureData(shaderInfo_t shader) {
     // Wasn't already saved, save it
     index = ApexLegends::Bsp::textureData.size();
 
+    // Debug: log texture emission
+    Sys_Printf("  Emitting texture: %s (flags: 0x%X)\n", tex.c_str(), shader.surfaceFlags);
+
     // Add to Table
     StringOutputStream data;
     data << tex.c_str();
-    std::vector<char> str = { data.begin(), data.end() + 1 };
+    std::vector<char> str = { data.begin(), data.end() };
+    str.push_back('\0');  // Add null terminator
 
     ApexLegends::TextureData_t &td = ApexLegends::Bsp::textureData.emplace_back();
     td.surfaceIndex = Titanfall::Bsp::textureDataData.size();
@@ -178,6 +189,8 @@ uint16_t ApexLegends::EmitMaterialSort(uint32_t index, int offset, int count) {
         ApexLegends::MaterialSort_t &ms = ApexLegends::Bsp::materialSorts.emplace_back();
         ms.textureData = index;
         ms.lightmapIndex = -1;
+        ms.unknown0 = 0;
+        ms.unknown1 = 0;
         ms.vertexOffset = offset;
 
         return pos;
@@ -193,6 +206,7 @@ void ApexLegends::EmitVertexUnlit(Shared::Vertex_t &vertex) {
     ul.vertexIndex = Titanfall::EmitVertex(vertex.xyz);
     ul.normalIndex = Titanfall::EmitVertexNormal(vertex.normal);
     ul.uv0         = vertex.textureUV;
+    ul.negativeOne = -1;
 }
 
 
@@ -206,6 +220,7 @@ void ApexLegends::EmitVertexLitFlat(Shared::Vertex_t &vertex) {
     lf.vertexIndex = Titanfall::EmitVertex(vertex.xyz);
     lf.normalIndex = Titanfall::EmitVertexNormal(vertex.normal);
     lf.uv0         = vertex.textureUV;
+    lf.unknown0    = 0;
 }
 
 
@@ -231,6 +246,8 @@ void ApexLegends::EmitVertexUnlitTS(Shared::Vertex_t &vertex) {
     ul.vertexIndex = Titanfall::EmitVertex(vertex.xyz);
     ul.normalIndex = Titanfall::EmitVertexNormal(vertex.normal);
     ul.uv0         = vertex.textureUV;
+    ul.unknown0    = 0;
+    ul.unknown1    = 0;
 }
 
 /*

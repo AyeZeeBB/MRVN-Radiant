@@ -33,10 +33,12 @@ void ApexLegends::BeginModel(entity_t &entity) {
     Sys_FPrintf( SYS_VRB, "   BeginModel: \"%s\"\n", entity.classname() );
     ApexLegends::Model_t &model = ApexLegends::Bsp::models.emplace_back();
     model.meshIndex = ApexLegends::Bsp::meshes.size();
-    model.bvhNodeIndex = 0;
-    model.bvhLeafIndex = 0;
-    model.vertexIndex = Titanfall::Bsp::vertices.size();
-    model.vertexFlags = 0;
+    model.bvhNodeIndex = 0;  // Will be set by EmitBVHNode
+    model.bvhLeafIndex = 0;  // Will be set by EmitBVHNode
+    model.vertexIndex = 0;   // Will be set by EmitBVHNode (packed vertex base)
+    model.bvhFlags = 0;      // Will be set by EmitBVHNode
+    model.origin[0] = model.origin[1] = model.origin[2] = 0.0f;
+    model.scale = 1.0f / 65536.0f;  // Default scale
 }
 
 /*

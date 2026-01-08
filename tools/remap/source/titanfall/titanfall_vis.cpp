@@ -60,7 +60,8 @@ uint32_t Titanfall::EmitTextureData(shaderInfo_t shader) {
     // Add to Table
     StringOutputStream  data;
     data << tex.c_str();
-    std::vector<char>  str = { data.begin(), data.end() + 1 };
+    std::vector<char>  str = { data.begin(), data.end() };
+    str.push_back('\0');  // Add null terminator
 
     Titanfall::Bsp::textureDataTable.emplace_back(Titanfall::Bsp::textureDataData.size());
     Titanfall::Bsp::textureDataData.insert(Titanfall::Bsp::textureDataData.end(), str.begin(), str.end());

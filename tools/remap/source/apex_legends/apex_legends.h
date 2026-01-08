@@ -33,9 +33,18 @@ void LoadR5BSPFile(rbspHeader_t *header, const char *filename);
 void WriteR5BSPFile(const char *filename);
 void CompileR5BSPFile();
 
-// BVH Node types
-#define BVH_CHILD_NODE 0
-#define BVH_CHILD_NONE 1
+// BVH Node child types (from IDA reverse engineering of CollBvh_VisitLeafs)
+#define BVH_CHILD_NODE        0   // Internal node - traverse further
+#define BVH_CHILD_NONE        1   // Empty child slot
+#define BVH_CHILD_EMPTY       2   // Empty leaf
+#define BVH_CHILD_BUNDLE      3   // Bundle of collision primitives
+#define BVH_CHILD_TRISTRIP    4   // Triangle strip
+#define BVH_CHILD_POLY3       5   // Triangle polygon
+#define BVH_CHILD_POLY4       6   // Quad polygon
+#define BVH_CHILD_POLY5PLUS   7   // 5+ vertex polygon
+#define BVH_CHILD_CONVEXHULL  8   // Convex hull (used for brush collision)
+#define BVH_CHILD_STATICPROP  9   // Static prop collision
+#define BVH_CHILD_HEIGHTFIELD 10  // Heightfield terrain collision
 
 namespace ApexLegends {
     void        EmitStubs();
@@ -72,39 +81,44 @@ namespace ApexLegends {
         uint32_t  flags;
     };
 
-    // 0x0F
+    // 0x0F - dmodel_t from IDA (64 bytes)
     struct Model_t {
-        MinMax    minmax;
-        int32_t   meshIndex;
-        int32_t   meshCount;
-        int32_t   bvhNodeIndex;
-        int32_t   bvhLeafIndex;
-        int32_t   vertexIndex;
-        int32_t   vertexFlags;
-        float     unk0;
-        float     unk1;
-        float     unk2;
-        int32_t   unk3;
+        MinMax    minmax;         // +0x00: mins/maxs (24 bytes)
+        int32_t   meshIndex;      // +0x18: firstMesh
+        int32_t   meshCount;      // +0x1C: meshCount
+        int32_t   bvhNodeIndex;   // +0x20: nodeStart - index into BVH nodes
+        int32_t   bvhLeafIndex;   // +0x24: leafDataStart - index into leaf data
+        int32_t   vertexIndex;    // +0x28: vertStart - index into collision verts
+        int32_t   bvhFlags;       // +0x2C: bvhFlags (& 1 = use packed vertices)
+        float     origin[3];      // +0x30: origin for BVH bounds decoding
+        float     scale;          // +0x3C: scale for BVH bounds decoding
     };
+    static_assert(sizeof(Model_t) == 64, "Model_t must be exactly 64 bytes");
 
-    // 0x12
+    // 0x12 - CollBvh4Node_s from IDA (64 bytes)
+    // Layout: bounds[24] (48 bytes) + packedMetaData[4] (16 bytes)
+    // packedMetaData[0]: cmIndex(8) | index0(24)
+    // packedMetaData[1]: padding(8) | index1(24)
+    // packedMetaData[2]: childType0(4) | childType1(4) | index2(24)
+    // packedMetaData[3]: childType2(4) | childType3(4) | index3(24)
     struct BVHNode_t {
-        int16_t   bounds[24];
+        int16_t   bounds[24];     // +0x00: 48 bytes of packed bounds
 
-        int32_t   cmIndex : 8;
-        int32_t   index0 : 24;
+        int32_t   cmIndex : 8;    // +0x30: contents mask index
+        int32_t   index0 : 24;    // +0x30: child 0 index (upper 24 bits)
 
-        int32_t   padding : 8;
-        int32_t   index1 : 24;
+        int32_t   padding : 8;    // +0x34: unused
+        int32_t   index1 : 24;    // +0x34: child 1 index (upper 24 bits)
 
-        int32_t   childType0 : 4;
-        int32_t   childType1 : 4;
-        int32_t   index2 : 24;
+        int32_t   childType0 : 4; // +0x38: child 0 type (low nibble)
+        int32_t   childType1 : 4; // +0x38: child 1 type (high nibble)
+        int32_t   index2 : 24;    // +0x38: child 2 index (upper 24 bits)
 
-        int32_t   childType2 : 4;
-        int32_t   childType3 : 4;
-        int32_t   index3 : 24;
+        int32_t   childType2 : 4; // +0x3C: child 2 type (low nibble)
+        int32_t   childType3 : 4; // +0x3C: child 3 type (high nibble)
+        int32_t   index3 : 24;    // +0x3C: child 3 index (upper 24 bits)
     };
+    static_assert(sizeof(BVHNode_t) == 64, "BVHNode_t must be exactly 64 bytes");
 
     // 0x47
     struct VertexUnlit_t {
@@ -201,12 +215,22 @@ namespace ApexLegends {
         uint32_t  zeros[5] = {0, 0, 0, 0, 0};
     };
 
+    // Packed collision vertex (6 bytes = 3 int16s)
+    // Game decodes as: worldPos = origin + (int16 << 16) * scale
+    #pragma pack(push, 1)
+    struct PackedVertex_t {
+        int16_t x, y, z;
+    };
+    #pragma pack(pop)
+    static_assert(sizeof(PackedVertex_t) == 6, "PackedVertex_t must be exactly 6 bytes");
+
     namespace Bsp {
         inline std::vector<TextureData_t>       textureData;
         inline std::vector<Model_t>             models;
         inline std::vector<int32_t>             contentsMasks;
         inline std::vector<BVHNode_t>           bvhNodes;
         inline std::vector<int32_t>             bvhLeafDatas;
+        inline std::vector<PackedVertex_t>      packedVertices;  // Collision vertices (lump 0x14)
         inline std::vector<VertexUnlit_t>       vertexUnlitVertices;
         inline std::vector<VertexLitFlat_t>     vertexLitFlatVertices;
         inline std::vector<VertexLitBump_t>     vertexLitBumpVertices;
