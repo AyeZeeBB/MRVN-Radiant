@@ -96,27 +96,81 @@ namespace ApexLegends {
     static_assert(sizeof(Model_t) == 64, "Model_t must be exactly 64 bytes");
 
     // 0x12 - CollBvh4Node_s from IDA (64 bytes)
-    // Layout: bounds[24] (48 bytes) + packedMetaData[4] (16 bytes)
-    // packedMetaData[0]: cmIndex(8) | index0(24)
-    // packedMetaData[1]: padding(8) | index1(24)
-    // packedMetaData[2]: childType0(4) | childType1(4) | index2(24)
-    // packedMetaData[3]: childType2(4) | childType3(4) | index3(24)
+    // Layout: bounds[24] (48 bytes) + childMetaData[4] (16 bytes)
+    //
+    // Each child's metadata is a separate uint32_t (4 children total, 16 bytes at +0x30):
+    //
+    // NODE children (childType=0):
+    //   value = nodeIndex(24-bit) | (cmIndex << 24)
+    //   - Bits 0-23: nodeIndex (3 bytes, little-endian)
+    //   - Bits 24-31: cmIndex
+    //   - childType is implied as 0
+    //
+    // LEAF children (childType>0):
+    //   Small index (<256): value = index | (childType << 8) | (cmIndex << 24)
+    //     - Bits 0-7: index
+    //     - Bits 8-15: childType
+    //     - Bits 16-23: 0
+    //     - Bits 24-31: cmIndex
+    //   Large index (>=256): value = index_low | (childType << 8) | (index_high << 16) | (cmIndex << 24)
+    //     - Bits 0-7: index low byte
+    //     - Bits 8-15: childType
+    //     - Bits 16-23: index high byte
+    //     - Bits 24-31: cmIndex
     struct BVHNode_t {
         int16_t   bounds[24];     // +0x00: 48 bytes of packed bounds
 
-        int32_t   cmIndex : 8;    // +0x30: contents mask index
-        int32_t   index0 : 24;    // +0x30: child 0 index (upper 24 bits)
+        // Raw metadata for each child (4 x uint32_t = 16 bytes at +0x30)
+        uint32_t  childMetaData[4];
 
-        int32_t   padding : 8;    // +0x34: unused
-        int32_t   index1 : 24;    // +0x34: child 1 index (upper 24 bits)
+        // Helper methods to set child metadata with proper encoding
+        void SetChild0(int childType, uint32_t index, int cmIndex = 0) {
+            uint32_t value;
+            if (childType == 0) {  // NODE - store cmIndex in high byte
+                value = (index & 0xFFFFFF) | (cmIndex << 24);
+            } else if (index < 256) {  // Leaf with small index
+                value = (index & 0xFF) | (childType << 8) | (cmIndex << 24);
+            } else {  // Leaf with large index - split index across bytes 0 and 2
+                value = (index & 0xFF) | (childType << 8) | ((index & 0xFF00) << 8) | (cmIndex << 24);
+            }
+            childMetaData[0] = value;
+        }
 
-        int32_t   childType0 : 4; // +0x38: child 0 type (low nibble)
-        int32_t   childType1 : 4; // +0x38: child 1 type (high nibble)
-        int32_t   index2 : 24;    // +0x38: child 2 index (upper 24 bits)
+        void SetChild1(int childType, uint32_t index, int cmIndex = 0) {
+            uint32_t value;
+            if (childType == 0) {  // NODE
+                value = (index & 0xFFFFFF) | (cmIndex << 24);
+            } else if (index < 256) {  // Leaf with small index
+                value = (index & 0xFF) | (childType << 8) | (cmIndex << 24);
+            } else {  // Leaf with large index
+                value = (index & 0xFF) | (childType << 8) | ((index & 0xFF00) << 8) | (cmIndex << 24);
+            }
+            childMetaData[1] = value;
+        }
 
-        int32_t   childType2 : 4; // +0x3C: child 2 type (low nibble)
-        int32_t   childType3 : 4; // +0x3C: child 3 type (high nibble)
-        int32_t   index3 : 24;    // +0x3C: child 3 index (upper 24 bits)
+        void SetChild2(int childType, uint32_t index, int cmIndex = 0) {
+            uint32_t value;
+            if (childType == 0) {  // NODE
+                value = (index & 0xFFFFFF) | (cmIndex << 24);
+            } else if (index < 256) {  // Leaf with small index
+                value = (index & 0xFF) | (childType << 8) | (cmIndex << 24);
+            } else {  // Leaf with large index
+                value = (index & 0xFF) | (childType << 8) | ((index & 0xFF00) << 8) | (cmIndex << 24);
+            }
+            childMetaData[2] = value;
+        }
+
+        void SetChild3(int childType, uint32_t index, int cmIndex = 0) {
+            uint32_t value;
+            if (childType == 0) {  // NODE
+                value = (index & 0xFFFFFF) | (cmIndex << 24);
+            } else if (index < 256) {  // Leaf with small index
+                value = (index & 0xFF) | (childType << 8) | (cmIndex << 24);
+            } else {  // Leaf with large index
+                value = (index & 0xFF) | (childType << 8) | ((index & 0xFF00) << 8) | (cmIndex << 24);
+            }
+            childMetaData[3] = value;
+        }
     };
     static_assert(sizeof(BVHNode_t) == 64, "BVHNode_t must be exactly 64 bytes");
 

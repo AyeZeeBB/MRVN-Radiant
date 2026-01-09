@@ -307,103 +307,87 @@ namespace {
     /*
         EmitTriangleStripLeaf
         Emits a triangle strip leaf (type 4)
-        
-        From IDA reverse engineering of Coll_Broad_PointVsTriangles:
-        - Header uint32: bits 0-11 = surfPropIdx, bits 12-15 = numTris-1, bits 16-31 = baseVertex >> 10
-        - Per-triangle uint32: bits 0-10 = v0 offset from running_base, bits 11-19 = v1 delta from v0+1, bits 20-28 = v2 delta from v0+1
-        
-        The game computes vertices as (with running_base updated each iteration):
-        - running_base starts as (baseVertex << 10)
-        - v0 = running_base + v0_offset
-        - v1 = v0 + 1 + v1_delta
-        - v2 = v0 + 1 + v2_delta
-        - running_base = v0 (for next triangle)
+
+        Format from analysis of original game BSP files:
+        - Header uint32_t: bits 0-11 = surfPropIdx, bits 12-15 = (numTris-1), bits 16-31 = baseVertex
+        - Per-triangle uint32_t: bits 0-10 = v0_offset (signed 11-bit), bits 11-19 = v1_delta (signed 9-bit),
+                              bits 20-28 = v2_delta (signed 9-bit), bits 29-31 = flags
+
+        Vertex decoding:
+        - running_base starts at baseVertex
+        - For each triangle:
+            - v0 = running_base + v0_offset
+            - v1 = v0 + 1 + v1_delta
+            - v2 = v0 + 1 + v2_delta
+            - running_base = v0 (for next triangle)
+
+        Note: Offsets are SIGNED and can be negative, enabling vertex reuse across non-consecutive triangles.
     */
     int EmitTriangleStripLeaf(const std::vector<int>& triIndices, int surfPropIdx = 0) {
         if (triIndices.empty()) {
             return ApexLegends::EmitBVHDataleaf();
         }
-        
+
         int numTris = std::min((int)triIndices.size(), 16);  // Max 16 tris (4-bit count)
 
         int leafIndex = ApexLegends::Bsp::bvhLeafDatas.size();
 
-        // The game decodes baseVertex as: running_base = baseVertex << 10
-        // So baseVertex must be aligned to 1024-vertex boundaries
-        // Pad the vertex array to ensure alignment
-        uint32_t baseVertexGlobal = static_cast<uint32_t>(ApexLegends::Bsp::packedVertices.size());
+        // Get the base vertex index (relative to model's vertex start)
+        uint32_t baseVertexRelative = static_cast<uint32_t>(ApexLegends::Bsp::packedVertices.size()) - g_modelPackedVertexBase;
 
-        // Calculate how many vertices we need to add to align to 1024 boundary
-        uint32_t alignmentPadding = (1024 - (baseVertexGlobal % 1024)) % 1024;
+        Sys_Printf("    EmitTriangleStripLeaf: %d tris, baseVertexRelative=%d\n",
+                   numTris, baseVertexRelative);
 
-        // Add padding vertices if needed
-        for (uint32_t i = 0; i < alignmentPadding; i++) {
-            ApexLegends::PackedVertex_t padVert = {0, 0, 0};
-            ApexLegends::Bsp::packedVertices.push_back(padVert);
-        }
-
-        // Now baseVertexGlobal is aligned to 1024
-        baseVertexGlobal = static_cast<uint32_t>(ApexLegends::Bsp::packedVertices.size());
-
-        // Convert to model-relative index
-        uint32_t baseVertexRelative = baseVertexGlobal - g_modelPackedVertexBase;
-        
-        Sys_Printf("    EmitTriangleStripLeaf: %d tris, baseVertexGlobal=%d, baseVertexRelative=%d\n",
-                   numTris, baseVertexGlobal, baseVertexRelative);
-        
+        // Emit all vertices first (3 per triangle)
+        std::vector<uint32_t> vertexIndices;
         for (int i = 0; i < numTris; i++) {
             const CollisionTri_t& tri = g_collisionTris[triIndices[i]];
-            uint32_t idx0 = EmitPackedVertex(tri.v0);
-            uint32_t idx1 = EmitPackedVertex(tri.v1);
-            uint32_t idx2 = EmitPackedVertex(tri.v2);
-            Sys_Printf("      Tri %d: verts at global indices [%d, %d, %d]\n", i, idx0, idx1, idx2);
+            vertexIndices.push_back(EmitPackedVertex(tri.v0));
+            vertexIndices.push_back(EmitPackedVertex(tri.v1));
+            vertexIndices.push_back(EmitPackedVertex(tri.v2));
         }
-        
-        // Header: bits 0-11 = surfPropIdx, bits 12-15 = numTris-1, bits 16-31 = baseVertex >> 10
-        // Since baseVertexRelative is aligned to 1024, we encode it as baseVertexRelative >> 10
-        // The game will decode as: running_base = (baseVertexRelative >> 10) << 10 = baseVertexRelative
-        uint32_t baseVertexEncoded = (baseVertexRelative >> 10) & 0xFFFF;
-        uint32_t header = (surfPropIdx & 0xFFF) | (((numTris - 1) & 0xF) << 12) | (baseVertexEncoded << 16);
-        ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(header));
-        
-        Sys_Printf("      Header: 0x%08X (surfProp=%d, numTris=%d, baseVertexEncoded=%d)\n",
-                   header, surfPropIdx, numTris, baseVertexEncoded);
-        
-        // Emit per-triangle data
-        // The game uses a running_base that starts as (baseVertexEncoded << 10) and updates to v0 each iteration
-        // For triangle i, our v0 is at baseVertexEncoded + i*3
 
-        uint32_t running_base = baseVertexEncoded << 10;  // Initial running base
+        // Header: bits 0-11 = surfPropIdx, bits 12-15 = (numTris-1), bits 16-31 = baseVertex
+        uint32_t header = (surfPropIdx & 0xFFF) | (((numTris - 1) & 0xF) << 12) | ((baseVertexRelative & 0xFFFF) << 16);
+        ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(header));
+
+        Sys_Printf("      Header: 0x%08X (surfProp=%d, numTris=%d, baseVertex=%d)\n",
+                   header, surfPropIdx, numTris, baseVertexRelative);
+
+        // Emit per-triangle data with signed offsets
+        // running_base is relative to baseVertexRelative
+        uint32_t running_base = 0;  // Start at baseVertex
 
         for (int i = 0; i < numTris; i++) {
-            // Our vertex layout: base + i*3 = v0, base + i*3 + 1 = v1, base + i*3 + 2 = v2
-            uint32_t v0_index = (baseVertexEncoded << 10) + i * 3;
+            uint32_t v0_index = baseVertexRelative + i * 3;
             uint32_t v1_index = v0_index + 1;
             uint32_t v2_index = v0_index + 2;
 
-            // v0_offset: v0 = running_base + v0_offset, so v0_offset = v0_index - running_base
-            uint32_t v0_offset = v0_index - running_base;
-            
-            // v1 = v0 + 1 + v1_delta, so v1_delta = v1_index - (v0_index + 1) = 0
-            uint32_t v1_delta = v1_index - (v0_index + 1);  // Should be 0
-            
-            // v2 = v0 + 1 + v2_delta, so v2_delta = v2_index - (v0_index + 1) = 1
-            uint32_t v2_delta = v2_index - (v0_index + 1);  // Should be 1
-            
-            // Pack: bits 0-10 = v0_offset, bits 11-19 = v1_delta, bits 20-28 = v2_delta
-            uint32_t triData = (v0_offset & 0x7FF) | ((v1_delta & 0x1FF) << 11) | ((v2_delta & 0x1FF) << 20);
+            // v0_offset: signed offset from running_base to v0
+            int32_t v0_offset = static_cast<int32_t>(v0_index) - static_cast<int32_t>(running_base);
+
+            // v1_delta: v1 is at (v0 + 1 + v1_delta), so v1_delta = v1_index - (v0_index + 1) = 0 for sequential
+            int32_t v1_delta = static_cast<int32_t>(v1_index) - static_cast<int32_t>(v0_index + 1);
+
+            // v2_delta: v2 is at (v0 + 1 + v2_delta), so v2_delta = v2_index - (v0_index + 1) = 1 for sequential
+            int32_t v2_delta = static_cast<int32_t>(v2_index) - static_cast<int32_t>(v0_index + 1);
+
+            // Pack signed values into their bit fields
+            // v0_offset: 11-bit signed (-1024 to 1023)
+            // v1_delta: 9-bit signed (-256 to 255)
+            // v2_delta: 9-bit signed (-256 to 255)
+            uint32_t triData = (static_cast<uint32_t>(v0_offset) & 0x7FF) |
+                              (static_cast<uint32_t>(v1_delta & 0x1FF) << 11) |
+                              (static_cast<uint32_t>(v2_delta & 0x1FF) << 20);
             ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(triData));
-            
-            Sys_Printf("      Tri %d: v0_idx=%d, running_base=%d, v0_offset=%d, triData=0x%08X\n",
-                       i, v0_index, running_base, v0_offset, triData);
-            Sys_Printf("        Game will decode: v0=%d, v1=%d, v2=%d\n",
-                       running_base + v0_offset, running_base + v0_offset + 1 + v1_delta, 
-                       running_base + v0_offset + 1 + v2_delta);
-            
+
+            Sys_Printf("      Tri %d: v0_idx=%d, running_base=%d, v0_off=%d, v1_del=%d, v2_del=%d, triData=0x%08X\n",
+                       i, v0_index, running_base, v0_offset, v1_delta, v2_delta, triData);
+
             // Update running_base to v0 for next triangle
             running_base = v0_index;
         }
-        
+
         return leafIndex;
     }
 
@@ -881,28 +865,25 @@ namespace {
         
         // Initialize with defaults - use index access since vector may reallocate
         memset(&ApexLegends::Bsp::bvhNodes[bspNodeIndex], 0, sizeof(ApexLegends::BVHNode_t));
-        ApexLegends::Bsp::bvhNodes[bspNodeIndex].cmIndex = ApexLegends::EmitContentsMask(buildNode.contentFlags);
+        int cmIndex = ApexLegends::EmitContentsMask(buildNode.contentFlags);
 
         if (buildNode.isLeaf) {
             // Leaf node - emit as single child with appropriate type
             int leafType = SelectBestLeafType(buildNode.triangleIndices);
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType0 = leafType;
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType1 = BVH4_TYPE_NONE;
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType2 = BVH4_TYPE_NONE;
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType3 = BVH4_TYPE_NONE;
-            
-            // Emit leaf data based on type
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].index0 = EmitLeafDataForType(leafType, buildNode.triangleIndices);
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].index1 = 0;
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].index2 = 0;
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].index3 = 0;
-            
+            int leafDataIndex = EmitLeafDataForType(leafType, buildNode.triangleIndices);
+
+            // Set child 0 with the leaf data
+            ApexLegends::Bsp::bvhNodes[bspNodeIndex].SetChild0(leafType, leafDataIndex, cmIndex);
+            ApexLegends::Bsp::bvhNodes[bspNodeIndex].SetChild1(BVH4_TYPE_NONE, 0, 0);
+            ApexLegends::Bsp::bvhNodes[bspNodeIndex].SetChild2(BVH4_TYPE_NONE, 0, 0);
+            ApexLegends::Bsp::bvhNodes[bspNodeIndex].SetChild3(BVH4_TYPE_NONE, 0, 0);
+
             // Pack bounds for this single child
             MinMax childBounds[4];
             childBounds[0] = buildNode.bounds;
             childBounds[1] = childBounds[2] = childBounds[3] = buildNode.bounds;  // Unused slots
             PackBoundsToInt16(childBounds, ApexLegends::Bsp::bvhNodes[bspNodeIndex].bounds);
-            
+
         } else {
             // Internal node - emit all children
             MinMax childBounds[4];
@@ -926,18 +907,13 @@ namespace {
             }
             
             PackBoundsToInt16(childBounds, ApexLegends::Bsp::bvhNodes[bspNodeIndex].bounds);
-            
-            // Set child types
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType0 = buildNode.childTypes[0];
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType1 = buildNode.childTypes[1];
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType2 = buildNode.childTypes[2];
-            ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType3 = buildNode.childTypes[3];
-            
+
             // Recursively emit children and get their indices
+            int childIndices[4] = {0, 0, 0, 0};
             for (int i = 0; i < 4; i++) {
                 int childIndex = 0;
                 int childType = buildNode.childTypes[i];
-                
+
                 if (buildNode.childIndices[i] >= 0) {
                     if (childType == BVH4_TYPE_NODE) {
                         // Recurse for internal nodes
@@ -948,34 +924,38 @@ namespace {
                         childIndex = EmitLeafDataForType(childType, childBuild.triangleIndices);
                     }
                 }
-                
+
+                childIndices[i] = childIndex;
                 Sys_Printf("    Setting child %d: type=%d, index=%d\n", i, childType, childIndex);
-                
-                // Access via index since vector may have reallocated during recursion
+            }
+
+            // Now set all children using SetChild methods
+            for (int i = 0; i < 4; i++) {
+                int childType = buildNode.childTypes[i];
+                // For NODE children, get child's cmIndex from the child node
+                int childCmIndex = 0;
+                if (childType == BVH4_TYPE_NODE && childIndices[i] >= 0 &&
+                    static_cast<size_t>(childIndices[i]) < ApexLegends::Bsp::bvhNodes.size()) {
+                    // Get cmIndex from child's metadata (bits 24-31)
+                    uint32_t childMeta = ApexLegends::Bsp::bvhNodes[childIndices[i]].childMetaData[0];
+                    childCmIndex = (childMeta >> 24) & 0xFF;
+                }
+
                 switch (i) {
-                    case 0: ApexLegends::Bsp::bvhNodes[bspNodeIndex].index0 = childIndex; break;
-                    case 1: ApexLegends::Bsp::bvhNodes[bspNodeIndex].index1 = childIndex; break;
-                    case 2: ApexLegends::Bsp::bvhNodes[bspNodeIndex].index2 = childIndex; break;
-                    case 3: ApexLegends::Bsp::bvhNodes[bspNodeIndex].index3 = childIndex; break;
+                    case 0: ApexLegends::Bsp::bvhNodes[bspNodeIndex].SetChild0(childType, childIndices[i], childCmIndex); break;
+                    case 1: ApexLegends::Bsp::bvhNodes[bspNodeIndex].SetChild1(childType, childIndices[i], childCmIndex); break;
+                    case 2: ApexLegends::Bsp::bvhNodes[bspNodeIndex].SetChild2(childType, childIndices[i], childCmIndex); break;
+                    case 3: ApexLegends::Bsp::bvhNodes[bspNodeIndex].SetChild3(childType, childIndices[i], childCmIndex); break;
                 }
             }
-            
+
             // Debug: print the final node state
-            Sys_Printf("    Final node %d: types=[%d,%d,%d,%d] indices=[%d,%d,%d,%d]\n",
+            Sys_Printf("    Final node %d: metadata=[0x%08X, 0x%08X, 0x%08X, 0x%08X]\n",
                        bspNodeIndex,
-                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType0,
-                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType1,
-                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType2,
-                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType3,
-                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].index0,
-                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].index1,
-                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].index2,
-                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].index3);
-            
-            // Hex dump of the metadata dwords for verification
-            const uint32_t* nodeData = reinterpret_cast<const uint32_t*>(&ApexLegends::Bsp::bvhNodes[bspNodeIndex]);
-            Sys_Printf("    Metadata dwords: [0x%08X, 0x%08X, 0x%08X, 0x%08X]\n",
-                       nodeData[12], nodeData[13], nodeData[14], nodeData[15]);
+                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].childMetaData[0],
+                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].childMetaData[1],
+                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].childMetaData[2],
+                       ApexLegends::Bsp::bvhNodes[bspNodeIndex].childMetaData[3]);
         }
 
         return bspNodeIndex;
@@ -1081,11 +1061,11 @@ void ApexLegends::EmitBVHNode() {
         
         ApexLegends::BVHNode_t& node = ApexLegends::Bsp::bvhNodes.emplace_back();
         memset(&node, 0, sizeof(node));
-        node.cmIndex = EmitContentsMask(CONTENTS_SOLID);
-        node.childType0 = BVH4_TYPE_NONE;
-        node.childType1 = BVH4_TYPE_NONE;
-        node.childType2 = BVH4_TYPE_NONE;
-        node.childType3 = BVH4_TYPE_NONE;
+        int cmIndex = EmitContentsMask(CONTENTS_SOLID);
+        node.SetChild0(BVH4_TYPE_NONE, 0, cmIndex);
+        node.SetChild1(BVH4_TYPE_NONE, 0, 0);
+        node.SetChild2(BVH4_TYPE_NONE, 0, 0);
+        node.SetChild3(BVH4_TYPE_NONE, 0, 0);
         return;
     }
     
@@ -1171,11 +1151,11 @@ void ApexLegends::EmitBVHNode() {
         Sys_FPrintf(SYS_WRN, "Warning: BVH build failed, emitting empty node\n");
         ApexLegends::BVHNode_t& node = ApexLegends::Bsp::bvhNodes.emplace_back();
         memset(&node, 0, sizeof(node));
-        node.cmIndex = EmitContentsMask(CONTENTS_SOLID);
-        node.childType0 = BVH4_TYPE_NONE;
-        node.childType1 = BVH4_TYPE_NONE;
-        node.childType2 = BVH4_TYPE_NONE;
-        node.childType3 = BVH4_TYPE_NONE;
+        int cmIndex = EmitContentsMask(CONTENTS_SOLID);
+        node.SetChild0(BVH4_TYPE_NONE, 0, cmIndex);
+        node.SetChild1(BVH4_TYPE_NONE, 0, 0);
+        node.SetChild2(BVH4_TYPE_NONE, 0, 0);
+        node.SetChild3(BVH4_TYPE_NONE, 0, 0);
         return;
     }
     
