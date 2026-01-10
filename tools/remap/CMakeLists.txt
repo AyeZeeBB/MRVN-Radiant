@@ -29,7 +29,6 @@ add_executable(remap
                common/unzip.h
                common/vfs.cpp
                common/vfs.h
-               source/apex_legends/apex_legends_collision_types.h
                source/apex_legends/apex_legends_collisions.cpp
                source/apex_legends/apex_legends_misc.cpp
                source/apex_legends/apex_legends_vis.cpp
