@@ -224,13 +224,22 @@ namespace ApexLegends {
     #pragma pack(pop)
     static_assert(sizeof(PackedVertex_t) == 6, "PackedVertex_t must be exactly 6 bytes");
 
+    // Float collision vertex (12 bytes = float3)
+    // Used when bvhFlags & 1 == 0 (Type 4 TriStrip leaves)
+    // Referenced directly as float3 from bvh->verts
+    struct CollisionVertex_t {
+        float x, y, z;
+    };
+    static_assert(sizeof(CollisionVertex_t) == 12, "CollisionVertex_t must be exactly 12 bytes");
+
     namespace Bsp {
         inline std::vector<TextureData_t>       textureData;
         inline std::vector<Model_t>             models;
         inline std::vector<int32_t>             contentsMasks;
         inline std::vector<BVHNode_t>           bvhNodes;
         inline std::vector<int32_t>             bvhLeafDatas;
-        inline std::vector<PackedVertex_t>      packedVertices;  // Collision vertices (lump 0x14)
+        inline std::vector<PackedVertex_t>      packedVertices;      // Packed collision verts (lump 0x14), bvhFlags & 1
+        inline std::vector<CollisionVertex_t>   collisionVertices;   // Float collision verts (lump 0x03), bvhFlags == 0
         inline std::vector<VertexUnlit_t>       vertexUnlitVertices;
         inline std::vector<VertexLitFlat_t>     vertexLitFlatVertices;
         inline std::vector<VertexLitBump_t>     vertexLitBumpVertices;

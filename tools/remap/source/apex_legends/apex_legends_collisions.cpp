@@ -30,6 +30,8 @@
 #include <numeric>
 #include <limits>
 #include <cstring>
+#include <map>
+#include <tuple>
 
 /*
     BVH4 Collision System for Apex Legends BSP
@@ -142,7 +144,7 @@ namespace {
         std::vector<int> heightfieldIndices;   // For heightfield leaves
         bool isLeaf = false;
         int contentFlags = CONTENTS_SOLID;
-        int preferredLeafType = BVH4_TYPE_CONVEXHULL;
+        int preferredLeafType = BVH4_TYPE_TRISTRIP;  // Use Type 4 (float verts) - matches official BSP
     };
 
     // Global collision data for current model
@@ -158,8 +160,11 @@ namespace {
     Vector3 g_bvhOrigin = Vector3(0, 0, 0);
     float g_bvhScale = 1.0f / 65536.0f;  // Default scale
     
-    // Base vertex index for current model's packed vertices
+    // Base vertex index for current model's packed vertices (bvhFlags=1)
     uint32_t g_modelPackedVertexBase = 0;
+    
+    // Base vertex index for current model's float collision vertices (bvhFlags=0)
+    uint32_t g_modelCollisionVertexBase = 0;
     
     /*
         EmitPackedVertex
@@ -192,6 +197,26 @@ namespace {
         uint32_t idx = static_cast<uint32_t>(ApexLegends::Bsp::packedVertices.size());
         ApexLegends::Bsp::packedVertices.push_back(vert);
 
+        return idx;
+    }
+
+    /*
+        EmitCollisionVertex (FLOAT)
+        Adds a world position as a float3 collision vertex to the collision vertices lump
+        Returns the index into the collision vertices array
+        
+        Used when bvhFlags=0 for Type 4 (TriStrip) leaves.
+        These are raw float3 values stored in lump 3 (same as render vertices).
+    */
+    uint32_t EmitCollisionVertex(const Vector3& worldPos) {
+        ApexLegends::CollisionVertex_t vert;
+        vert.x = worldPos.x();
+        vert.y = worldPos.y();
+        vert.z = worldPos.z();
+        
+        uint32_t idx = static_cast<uint32_t>(ApexLegends::Bsp::collisionVertices.size());
+        ApexLegends::Bsp::collisionVertices.push_back(vert);
+        
         return idx;
     }
 
@@ -324,21 +349,95 @@ namespace {
         EmitTriangleStripLeaf  
         Emits a Type 4 (TriStrip) leaf using FLOAT vertices
         
-        Type 4 uses full float3 vertices (12 bytes each) instead of packed int16x3.
-        The vertex array is at bvh->verts as float3*, not CollPackedPos_s*.
+        Type 4 uses full float3 vertices (12 bytes each) stored in lump 3.
+        This is the format used by official BSP files with bvhFlags=0.
         
-        From IDA (CollBvh_VisitLeafs case 4):
-        - Uses vertData[12 * idx] - 12-byte stride = float3
-        - Header similar to Type 5 but different vertex fetch
+        From analysis of official BSP (CollisionBSPData_Load and CollLeafHandler_PhysColl_Poly_4_):
         
-        For now, we always use Type 5 (Poly3) with packed vertices since
-        we set bvhFlags=1 which indicates packed vertex usage.
+        Header format (4 bytes):
+          - bits 0-11:  surfPropIdx
+          - bits 12-15: (numPolys - 1), so max 16 polys per leaf
+          - bits 16-31: baseVertex (index into float vertex array)
+        
+        Per-triangle format (4 bytes each):
+          - bits 0-10:  v0_offset (added to running_base to get v0 index)
+          - bits 11-19: v1_delta (v1 = v0 + 1 + v1_delta)
+          - bits 20-28: v2_delta (v2 = v0 + 1 + v2_delta)
+          - bits 29-31: flags (unused)
+        
+        Vertex indexing (from CollLeafHandler_PhysColl_Poly_4_):
+          running_base starts at (baseVertex << 10)
+          For each triangle:
+            v0_idx = running_base + v0_offset
+            running_base = v0_idx (for next triangle)
+            v1_idx = v0_idx + 1 + v1_delta
+            v2_idx = v0_idx + 1 + v2_delta
+          Vertices fetched as: verts[v0_idx], verts[v1_idx], verts[v2_idx]
+          Where verts is float3 array at 12-byte stride
     */
     int EmitTriangleStripLeaf(const std::vector<int>& triIndices, int surfPropIdx = 0) {
-        // Type 4 uses float vertices, but we use packed vertices (bvhFlags=1)
-        // So we emit as Type 5 (Poly3) instead, which uses the same format
-        // but with packed int16x3 vertices
-        return EmitPoly3Leaf(triIndices, surfPropIdx);
+        if (triIndices.empty()) {
+            return ApexLegends::EmitBVHDataleaf();
+        }
+        
+        int numTris = std::min((int)triIndices.size(), 16);  // Max 16 tris (4-bit count)
+        int leafIndex = ApexLegends::Bsp::bvhLeafDatas.size();
+
+        // Emit all vertices for this leaf sequentially into float vertex array
+        uint32_t firstVertexIdx = static_cast<uint32_t>(ApexLegends::Bsp::collisionVertices.size());
+        
+        // Emit vertices - 3 per triangle, sequentially
+        for (int i = 0; i < numTris; i++) {
+            const CollisionTri_t& tri = g_collisionTris[triIndices[i]];
+            EmitCollisionVertex(tri.v0);
+            EmitCollisionVertex(tri.v1);
+            EmitCollisionVertex(tri.v2);
+        }
+        
+        // Calculate model-relative vertex index
+        uint32_t baseVertexRelative = firstVertexIdx - g_modelCollisionVertexBase;
+        
+        // The baseVertex stored must satisfy: (baseVertex << 10) points to or before our first vertex
+        // We encode as aligned-down value and track the offset
+        uint32_t baseVertexEncoded = baseVertexRelative >> 10;
+        uint32_t initialOffset = baseVertexRelative - (baseVertexEncoded << 10);
+        
+        // Header: bits 0-11 = surfPropIdx, bits 12-15 = numPolys-1, bits 16-31 = baseVertex
+        uint32_t headerWord = (surfPropIdx & 0xFFF) | 
+                              (((numTris - 1) & 0xF) << 12) | 
+                              (baseVertexEncoded << 16);
+        ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(headerWord));
+        
+        // Emit per-triangle vertex index data
+        // running_base starts at (baseVertexEncoded << 10)
+        uint32_t running_base = baseVertexEncoded << 10;
+        
+        for (int i = 0; i < numTris; i++) {
+            // Our vertex layout: tri i uses vertices at baseVertexRelative + i*3, +i*3+1, +i*3+2
+            uint32_t v0_idx = baseVertexRelative + i * 3;
+            uint32_t v1_idx = v0_idx + 1;
+            uint32_t v2_idx = v0_idx + 2;
+
+            // v0_offset: v0_idx = running_base + v0_offset
+            uint32_t v0_offset = v0_idx - running_base;
+            
+            // v1_delta: v1_idx = v0_idx + 1 + v1_delta
+            // So: v1_delta = v1_idx - v0_idx - 1 = 1 - 1 = 0
+            uint32_t v1_delta = v1_idx - v0_idx - 1;
+            
+            // v2_delta: v2_idx = v0_idx + 1 + v2_delta
+            // So: v2_delta = v2_idx - v0_idx - 1 = 2 - 1 = 1
+            uint32_t v2_delta = v2_idx - v0_idx - 1;
+            
+            // Pack: bits 0-10 = v0_offset, bits 11-19 = v1_delta, bits 20-28 = v2_delta
+            uint32_t triData = (v0_offset & 0x7FF) | ((v1_delta & 0x1FF) << 11) | ((v2_delta & 0x1FF) << 20);
+            ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(triData));
+            
+            // Update running_base to v0 for next triangle
+            running_base = v0_idx;
+        }
+        
+        return leafIndex;
     }
 
     /*
@@ -355,21 +454,227 @@ namespace {
 
     /*
         EmitConvexHullLeaf
-        Emits a convex hull leaf (type 8)
+        Emits a convex hull leaf (type 8) for brush collision
         
-        From IDA (CollBvh_VisitLeafs case 8):
-        - Header bytes [0-3]: numVerts, numFaces, numTris, numPoly5
-        - Bytes [4-19]: origin.x, origin.y, origin.z, scale (float4)
-        - Then: packed vertices (6 bytes each)
-        - Then: face indices
-        - Then: embedded Type 5 polys for numTris triangles
-        - Then: embedded Type 7 polys for numPoly5 5+ polys
+        From IDA (CollLeafHandler_ConvexHull @ 0x140597ea0):
         
-        For simplicity, we convert convex hulls to Type 5 triangle leaves.
+        CollLeafConvexHull_s layout:
+          [0]:   numVerts (uint8) - number of hull vertices
+          [1]:   numFaces (uint8) - number of face planes (triangles for point tests)
+          [2]:   numTriSets (uint8) - number of embedded Type 5 (Poly3) entries
+          [3]:   numQuadSets (uint8) - number of embedded Type 7 (Poly5+) entries
+          [4-7]: origin.x (float)
+          [8-11]: origin.y (float)
+          [12-15]: origin.z (float)
+          [16-19]: decodeScale (float)
+          [20+]: vertices (numVerts * 6 bytes = CollPackedPos_s)
+          Then:  face vertex indices (numFaces * 3 bytes = 3 uint8 per face)
+          Aligned to 4 bytes
+          Then:  embedded CollLeafPoly_s for numTriSets triangles (Type 5 format)
+          Then:  embedded CollLeafPoly_s for numQuadSets polys (Type 7 format)
+          Final: surfPropIdx at end (uint16, bits 0-11)
+        
+        Vertex decode (same as global): worldPos = origin + (int16 << 16) * scale
+        
+        Face indices: used for point-inside-convex-hull tests (dot with normals)
+        Embedded polys: used for ray/box intersection tests
     */
+    int EmitConvexHullLeaf(const CollisionHull_t& hull, int surfPropIdx = 0) {
+        if (hull.vertices.empty() || hull.faces.empty()) {
+            return ApexLegends::EmitBVHDataleaf();
+        }
+        
+        int leafIndex = ApexLegends::Bsp::bvhLeafDatas.size();
+        
+        // Limit sizes to uint8 max
+        int numVerts = std::min((int)hull.vertices.size(), 255);
+        int numFaces = std::min((int)hull.faces.size(), 255);
+        
+        // We'll embed all faces as Type 5 triangles (simpler than mixed types)
+        int numTriSets = 1;  // Single poly set containing all triangles
+        int numQuadSets = 0;
+        
+        // ---- Header: 4 bytes packed as uint32 ----
+        uint32_t header = (numVerts & 0xFF) | 
+                          ((numFaces & 0xFF) << 8) |
+                          ((numTriSets & 0xFF) << 16) |
+                          ((numQuadSets & 0xFF) << 24);
+        ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(header));
+        
+        // ---- Origin: 12 bytes as 3 floats ----
+        // Use the hull's local origin for vertex decoding
+        union { float f; int32_t i; } floatInt;
+        
+        floatInt.f = hull.origin.x();
+        ApexLegends::Bsp::bvhLeafDatas.push_back(floatInt.i);
+        floatInt.f = hull.origin.y();
+        ApexLegends::Bsp::bvhLeafDatas.push_back(floatInt.i);
+        floatInt.f = hull.origin.z();
+        ApexLegends::Bsp::bvhLeafDatas.push_back(floatInt.i);
+        
+        // ---- Scale: 4 bytes as float ----
+        floatInt.f = hull.scale;
+        ApexLegends::Bsp::bvhLeafDatas.push_back(floatInt.i);
+        
+        // ---- Vertices: numVerts * 6 bytes (packed as int32s) ----
+        // Pack 2 int16s per word, with extra handling for odd counts
+        float invScale = 1.0f / (hull.scale * 65536.0f);
+        std::vector<int16_t> packedVerts;
+        packedVerts.reserve(numVerts * 3);
+        
+        for (int i = 0; i < numVerts; i++) {
+            const Vector3& v = hull.vertices[i];
+            float px = (v.x() - hull.origin.x()) * invScale;
+            float py = (v.y() - hull.origin.y()) * invScale;
+            float pz = (v.z() - hull.origin.z()) * invScale;
+            
+            packedVerts.push_back(static_cast<int16_t>(std::clamp(px, -32768.0f, 32767.0f)));
+            packedVerts.push_back(static_cast<int16_t>(std::clamp(py, -32768.0f, 32767.0f)));
+            packedVerts.push_back(static_cast<int16_t>(std::clamp(pz, -32768.0f, 32767.0f)));
+        }
+        
+        // Pack int16s into int32s (2 per word)
+        for (size_t i = 0; i < packedVerts.size(); i += 2) {
+            uint32_t word = static_cast<uint16_t>(packedVerts[i]);
+            if (i + 1 < packedVerts.size()) {
+                word |= static_cast<uint32_t>(static_cast<uint16_t>(packedVerts[i + 1])) << 16;
+            }
+            ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(word));
+        }
+        
+        // ---- Face indices: numFaces * 3 bytes ----
+        // Each face has 3 vertex indices (uint8 each)
+        std::vector<uint8_t> faceBytes;
+        faceBytes.reserve(numFaces * 3);
+        
+        for (int i = 0; i < numFaces; i++) {
+            faceBytes.push_back(static_cast<uint8_t>(hull.faces[i][0]));
+            faceBytes.push_back(static_cast<uint8_t>(hull.faces[i][1]));
+            faceBytes.push_back(static_cast<uint8_t>(hull.faces[i][2]));
+        }
+        
+        // Pad to 4-byte alignment
+        while (faceBytes.size() % 4 != 0) {
+            faceBytes.push_back(0);
+        }
+        
+        // Pack into int32s
+        for (size_t i = 0; i < faceBytes.size(); i += 4) {
+            uint32_t word = faceBytes[i] |
+                           (faceBytes[i + 1] << 8) |
+                           (faceBytes[i + 2] << 16) |
+                           (faceBytes[i + 3] << 24);
+            ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(word));
+        }
+        
+        // ---- Embedded CollLeafPoly_s for triangle sets ----
+        // Format: uint16 header (surfPropIdx|numPolys) + uint16 baseVertex + per-tri uint32s
+        // For convex hull, we emit all faces as one triangle poly set
+        
+        if (numTriSets > 0 && numFaces > 0) {
+            // Max 16 tris per poly set due to 4-bit count
+            int trisToEmit = std::min(numFaces, 16);
+            
+            // Header: bits 0-11 = surfPropIdx, bits 12-15 = numPolys-1
+            // For convex hull embedded polys, baseVertex is 0 (local to hull verts)
+            uint32_t polyHeader = (surfPropIdx & 0xFFF) | (((trisToEmit - 1) & 0xF) << 12);
+            uint32_t baseVertex = 0;  // Index into hull's local vertex array
+            uint32_t headerWord = polyHeader | (baseVertex << 16);
+            ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(headerWord));
+            
+            // Emit per-triangle data
+            // For convex hull, vertex indices are local (0 to numVerts-1)
+            // We emit them with direct indices since baseVertex=0
+            uint32_t running_base = 0;
+            
+            for (int i = 0; i < trisToEmit; i++) {
+                uint32_t v0 = hull.faces[i][0];
+                uint32_t v1 = hull.faces[i][1];
+                uint32_t v2 = hull.faces[i][2];
+                
+                // v0_offset from running_base
+                uint32_t v0_offset = v0 - running_base;
+                
+                // v1_delta = v1 - v0 - 1 (can be negative, so use signed)
+                int32_t v1_delta = static_cast<int32_t>(v1) - static_cast<int32_t>(v0) - 1;
+                int32_t v2_delta = static_cast<int32_t>(v2) - static_cast<int32_t>(v0) - 1;
+                
+                // Clamp deltas to 9-bit signed range (-256 to 255)
+                v1_delta = std::clamp(v1_delta, -256, 255);
+                v2_delta = std::clamp(v2_delta, -256, 255);
+                
+                // Pack: bits 0-10 = v0_offset, bits 11-19 = v1_delta, bits 20-28 = v2_delta
+                uint32_t triData = (v0_offset & 0x7FF) |
+                                   ((static_cast<uint32_t>(v1_delta) & 0x1FF) << 11) |
+                                   ((static_cast<uint32_t>(v2_delta) & 0x1FF) << 20);
+                ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(triData));
+                
+                running_base = v0;
+            }
+        }
+        
+        // ---- Final surfPropIdx (uint16 at end, bits 0-11) ----
+        // This is read at the very end of the hull data
+        uint32_t finalSurfProp = surfPropIdx & 0xFFF;
+        ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(finalSurfProp));
+        
+        return leafIndex;
+    }
+    
+    // Overload for simple triangle-based convex hull (backwards compatibility)
     int EmitConvexHullLeaf(const std::vector<int>& triIndices, int contentsMaskIdx = 0) {
-        // For now, emit as Poly3 (simpler and works for all cases)
-        return EmitPoly3Leaf(triIndices, 0);
+        if (triIndices.empty()) {
+            return ApexLegends::EmitBVHDataleaf();
+        }
+        
+        // Build a CollisionHull_t from the triangles
+        CollisionHull_t hull;
+        
+        // Compute bounds to get origin and scale
+        Vector3 mins(FLT_MAX, FLT_MAX, FLT_MAX);
+        Vector3 maxs(-FLT_MAX, -FLT_MAX, -FLT_MAX);
+        
+        std::map<std::tuple<float, float, float>, int> vertexMap;
+        
+        for (int triIdx : triIndices) {
+            const CollisionTri_t& tri = g_collisionTris[triIdx];
+            
+            for (const Vector3* vp : {&tri.v0, &tri.v1, &tri.v2}) {
+                mins = Vec3Min(mins, *vp);
+                maxs = Vec3Max(maxs, *vp);
+                
+                auto key = std::make_tuple(vp->x(), vp->y(), vp->z());
+                if (vertexMap.find(key) == vertexMap.end()) {
+                    int idx = hull.vertices.size();
+                    vertexMap[key] = idx;
+                    hull.vertices.push_back(*vp);
+                }
+            }
+        }
+        
+        // Build faces from triangle indices
+        for (int triIdx : triIndices) {
+            const CollisionTri_t& tri = g_collisionTris[triIdx];
+            
+            auto k0 = std::make_tuple(tri.v0.x(), tri.v0.y(), tri.v0.z());
+            auto k1 = std::make_tuple(tri.v1.x(), tri.v1.y(), tri.v1.z());
+            auto k2 = std::make_tuple(tri.v2.x(), tri.v2.y(), tri.v2.z());
+            
+            hull.faces.push_back({vertexMap[k0], vertexMap[k1], vertexMap[k2]});
+        }
+        
+        // Set origin and scale
+        Vector3 center = (mins + maxs) * 0.5f;
+        Vector3 extent = maxs - mins;
+        float maxExtent = std::max({extent.x(), extent.y(), extent.z()});
+        
+        hull.origin = center;
+        hull.scale = maxExtent / 65536.0f;  // Scale so extents fit in int16 range
+        if (hull.scale < 1e-6f) hull.scale = 1.0f;
+        
+        hull.contentFlags = CONTENTS_SOLID;
+        
+        return EmitConvexHullLeaf(hull, 0);
     }
 
     /*
@@ -436,17 +741,18 @@ namespace {
         Chooses the optimal leaf type for a set of triangles
         Returns the appropriate BVH4_TYPE_* constant
         
-        Since we use packed vertices (bvhFlags=1), we MUST use Type 5 (POLY3).
-        Type 4 (TRISTRIP) uses float vertices which requires bvhFlags=0.
+        Now uses Type 4 (TRISTRIP) with float vertices (bvhFlags=0), matching
+        the official BSP format from Apex Legends.
+        
+        Type 4 is the dominant leaf type in official maps (~18k leaves).
     */
-    int SelectBestLeafType(const std::vector<int>& triIndices) {
+    int SelectBestLeafType(const std::vector<int>& triIndices, int preferredType = BVH4_TYPE_TRISTRIP) {
         if (triIndices.empty()) {
             return BVH4_TYPE_EMPTY;
         }
         
-        // Always use POLY3 (type 5) since we set bvhFlags=1 (packed vertices)
-        // Type 4 would require float vertices (bvhFlags=0)
-        return BVH4_TYPE_POLY3;
+        // Use Type 4 (TRISTRIP) with float vertices - matches official BSP format
+        return BVH4_TYPE_TRISTRIP;
     }
 
     /*
@@ -454,15 +760,30 @@ namespace {
         Emits leaf data based on the specified type
         Returns index into bvhLeafDatas
         
-        Note: We only support Type 5 (Poly3) for now since we use packed vertices.
+        Supported types:
+        - Type 4 (TriStrip): Float triangles - default for mesh collision (official format)
+        - Type 5 (Poly3): Packed int16 triangles - legacy support
+        - Type 8 (ConvexHull): Convex hull with local origin/scale - for brushes
     */
     int EmitLeafDataForType(int leafType, const std::vector<int>& triIndices, int surfPropIdx = 0) {
         if (triIndices.empty()) {
             return 0;  // Empty leaf
         }
         
-        // All types emit as Poly3 since we use packed vertices (bvhFlags=1)
-        return EmitPoly3Leaf(triIndices, surfPropIdx);
+        switch (leafType) {
+            case BVH4_TYPE_TRISTRIP:
+                // Emit as TriStrip triangles using float vertices (official format)
+                return EmitTriangleStripLeaf(triIndices, surfPropIdx);
+                
+            case BVH4_TYPE_CONVEXHULL:
+                // Emit as proper convex hull with local origin/scale
+                return EmitConvexHullLeaf(triIndices, surfPropIdx);
+                
+            case BVH4_TYPE_POLY3:
+            default:
+                // Emit as Poly3 triangles using global packed vertices (legacy)
+                return EmitPoly3Leaf(triIndices, surfPropIdx);
+        }
     }
 
     /*
@@ -689,14 +1010,14 @@ namespace {
                         g_bvhBuildNodes[leafIndex].contentFlags = CONTENTS_SOLID;
                     }
                     g_bvhBuildNodes[nodeIndex].childIndices[i] = leafIndex;
-                    g_bvhBuildNodes[nodeIndex].childTypes[i] = SelectBestLeafType(partitions[i]);
+                    g_bvhBuildNodes[nodeIndex].childTypes[i] = SelectBestLeafType(partitions[i], g_bvhBuildNodes[leafIndex].preferredLeafType);
                 } else {
                     // Recursively build
                     int childIdx = BuildBVH4Node(partitions[i], depth + 1);
                     g_bvhBuildNodes[nodeIndex].childIndices[i] = childIdx;
                     if (childIdx >= 0) {
                         if (g_bvhBuildNodes[childIdx].isLeaf) {
-                            g_bvhBuildNodes[nodeIndex].childTypes[i] = SelectBestLeafType(g_bvhBuildNodes[childIdx].triangleIndices);
+                            g_bvhBuildNodes[nodeIndex].childTypes[i] = SelectBestLeafType(g_bvhBuildNodes[childIdx].triangleIndices, g_bvhBuildNodes[childIdx].preferredLeafType);
                         } else {
                             g_bvhBuildNodes[nodeIndex].childTypes[i] = BVH4_TYPE_NODE;
                         }
@@ -731,7 +1052,7 @@ namespace {
 
         if (buildNode.isLeaf) {
             // Leaf node - emit as single child with appropriate type
-            int leafType = SelectBestLeafType(buildNode.triangleIndices);
+            int leafType = SelectBestLeafType(buildNode.triangleIndices, buildNode.preferredLeafType);
             ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType0 = leafType;
             ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType1 = BVH4_TYPE_NONE;
             ApexLegends::Bsp::bvhNodes[bspNodeIndex].childType2 = BVH4_TYPE_NONE;
@@ -878,6 +1199,15 @@ namespace {
 void ApexLegends::EmitBVHNode() {
     Sys_FPrintf(SYS_VRB, "Building BVH4 collision tree...\n");
     
+    // Reserve index 0 with a dummy vertex (0,0,0) - matches official BSP format
+    // This must happen before ANY vertices are emitted, so model 0 gets vertexIndex=1
+    if (ApexLegends::Bsp::collisionVertices.empty()) {
+        ApexLegends::CollisionVertex_t dummy;
+        dummy.x = dummy.y = dummy.z = 0.0f;
+        ApexLegends::Bsp::collisionVertices.push_back(dummy);
+        Sys_FPrintf(SYS_VRB, "  Reserved collision vertex index 0 with dummy (0,0,0)\n");
+    }
+    
     // Get the current model to update
     ApexLegends::Model_t& model = ApexLegends::Bsp::models.back();
     
@@ -944,7 +1274,14 @@ void ApexLegends::EmitBVHNode() {
     g_bvhOrigin = center;
     g_bvhScale = bvhScale;
     
-    // Record base vertex index for this model's collision vertices
+    // Record base vertex index for this model's collision vertices (float3)
+    // In lump 3, render vertices come first, then collision vertices.
+    // model.vertexIndex needs to point to global index in lump 3.
+    // Collision vertices array is local; add render vertex count for global index.
+    uint32_t renderVertexCount = static_cast<uint32_t>(Titanfall::Bsp::vertices.size());
+    g_modelCollisionVertexBase = static_cast<uint32_t>(ApexLegends::Bsp::collisionVertices.size());
+    
+    // Also track packed vertices for legacy code paths (not used with bvhFlags=0)
     g_modelPackedVertexBase = static_cast<uint32_t>(ApexLegends::Bsp::packedVertices.size());
     
     // Store in model
@@ -952,11 +1289,13 @@ void ApexLegends::EmitBVHNode() {
     model.origin[1] = center.y();
     model.origin[2] = center.z();
     model.scale = bvhScale;
-    model.vertexIndex = g_modelPackedVertexBase;  // Index into packed vertices for this model
-    model.bvhFlags = 1;  // Use packed vertices (int16x3)
+    // vertexIndex = global offset in lump 3 = render verts + collision array start
+    model.vertexIndex = renderVertexCount + g_modelCollisionVertexBase;
+    model.bvhFlags = 0;  // Use float vertices (float3) - matches official BSP format
     
-    Sys_FPrintf(SYS_VRB, "  BVH origin: (%.1f, %.1f, %.1f), scale: %g\n", 
-               center.x(), center.y(), center.z(), bvhScale);
+    Sys_FPrintf(SYS_VRB, "  BVH origin: (%.1f, %.1f, %.1f), scale: %g, vertexBase: %u (render: %u + coll: %u)\n", 
+               center.x(), center.y(), center.z(), bvhScale, 
+               model.vertexIndex, renderVertexCount, g_modelCollisionVertexBase);
     
     // Build triangle index list
     std::vector<int> allTriIndices(g_collisionTris.size());
@@ -986,7 +1325,7 @@ void ApexLegends::EmitBVHNode() {
     Sys_FPrintf(SYS_VRB, "  Emitted %zu BVH nodes, %zu leaf data entries, %zu packed vertices\n", 
                ApexLegends::Bsp::bvhNodes.size() - model.bvhNodeIndex,
                ApexLegends::Bsp::bvhLeafDatas.size() - model.bvhLeafIndex,
-               ApexLegends::Bsp::packedVertices.size() - g_modelPackedVertexBase);
+               ApexLegends::Bsp::collisionVertices.size() - g_modelCollisionVertexBase);
     
     // Clean up build data
     g_bvhBuildNodes.clear();

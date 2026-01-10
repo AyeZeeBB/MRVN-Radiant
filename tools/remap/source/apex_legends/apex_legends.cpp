@@ -75,7 +75,23 @@ void WriteR5BSPFile(const char *filename) {
     /* Write lumps */
     AddLump(file, header.lumps[R5_LUMP_ENTITIES],                 Titanfall::Bsp::entities);
     AddLump(file, header.lumps[R5_LUMP_TEXTURE_DATA],             ApexLegends::Bsp::textureData);
-    AddLump(file, header.lumps[R5_LUMP_VERTICES],                 Titanfall::Bsp::vertices);
+    
+    // Write lump 3: Render vertices followed by collision vertices
+    // Both are float3 format. Collision's model.vertexIndex points past render verts.
+    {
+        header.lumps[R5_LUMP_VERTICES].offset = ftell(file);
+        // Write render vertices first
+        if (!Titanfall::Bsp::vertices.empty()) {
+            SafeWrite(file, Titanfall::Bsp::vertices.data(), 
+                      Titanfall::Bsp::vertices.size() * sizeof(Vector3));
+        }
+        // Append collision vertices
+        if (!ApexLegends::Bsp::collisionVertices.empty()) {
+            SafeWrite(file, ApexLegends::Bsp::collisionVertices.data(),
+                      ApexLegends::Bsp::collisionVertices.size() * sizeof(ApexLegends::CollisionVertex_t));
+        }
+        header.lumps[R5_LUMP_VERTICES].length = ftell(file) - header.lumps[R5_LUMP_VERTICES].offset;
+    }
     AddLump(file, header.lumps[R5_LUMP_LIGHTPROBE_PARENT_INFOS],  ApexLegends::Bsp::lightprobeParentInfos_stub);  // stub
     AddLump(file, header.lumps[R5_LUMP_SHADOW_ENVIRONMENTS],      ApexLegends::Bsp::shadowEnvironments_stub);     // stub
     AddLump(file, header.lumps[R5_LUMP_MODELS],                   ApexLegends::Bsp::models);
@@ -84,7 +100,9 @@ void WriteR5BSPFile(const char *filename) {
     AddLump(file, header.lumps[R5_LUMP_SURFACE_PROPERTIES],       ApexLegends::Bsp::surfaceProperties_stub);
     AddLump(file, header.lumps[R5_LUMP_BVH_NODES],                ApexLegends::Bsp::bvhNodes);
     AddLump(file, header.lumps[R5_LUMP_BVH_LEAF_DATA],            ApexLegends::Bsp::bvhLeafDatas);
-    AddLump(file, header.lumps[R5_LUMP_PACKED_VERTICES],          ApexLegends::Bsp::packedVertices);  // Collision vertices
+    AddLump(file, header.lumps[R5_LUMP_PACKED_VERTICES],          ApexLegends::Bsp::packedVertices);  // Packed collision vertices (bvhFlags=1)
+    // Note: Float collision vertices are written to R5_LUMP_COLLISION_VERTICES (lump 3) via collisionVertices
+    // This is done alongside regular vertices - see Titanfall::Bsp::vertices
     AddLump(file, header.lumps[R5_LUMP_ENTITY_PARTITIONS],        Titanfall::Bsp::entityPartitions);
     AddLump(file, header.lumps[R5_LUMP_VERTEX_NORMALS],           Titanfall::Bsp::vertexNormals);
 

@@ -163,7 +163,8 @@
 #define R5_LUMP_ENTITIES						0x00
 #define R5_LUMP_PLANES							0x01
 #define R5_LUMP_TEXTURE_DATA					0x02
-#define R5_LUMP_VERTICES						0x03
+#define R5_LUMP_VERTICES						0x03  // Render vertices AND collision vertices (float3)
+#define R5_LUMP_COLLISION_VERTICES				0x03  // Alias: BVH collision float vertices (when bvhFlags=0)
 #define R5_LUMP_LIGHTPROBE_PARENT_INFOS			0x04
 #define R5_LUMP_SHADOW_ENVIRONMENTS				0x05
 #define R5_LUMP_MODELS							0x0E
