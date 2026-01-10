@@ -24,7 +24,6 @@
 
 #include "../remap.h"
 #include "../bspfile_abstract.h"
-#include "apex_legends_collision_types.h"
 #include <ctime>
 #include <algorithm>
 #include <numeric>
