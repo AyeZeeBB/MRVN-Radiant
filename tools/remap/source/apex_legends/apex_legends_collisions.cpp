@@ -342,11 +342,15 @@ namespace {
         uint32_t baseVertexGlobal = static_cast<uint32_t>(ApexLegends::Bsp::packedVertices.size());
         
         // Emit vertices - 3 per triangle, sequentially
+        // NOTE: We swap v1 and v2 to reverse the winding order!
+        // The game computes normals as (v1-v0) × (v0-v2) = -[(v1-v0) × (v2-v0)]
+        // This is the OPPOSITE of standard CCW winding (v1-v0) × (v2-v0).
+        // By swapping v1/v2, we ensure the game computes the correct normal direction.
         for (int i = 0; i < numTris; i++) {
             const CollisionTri_t& tri = g_collisionTris[triIndices[i]];
             EmitPackedVertex(tri.v0);
-            EmitPackedVertex(tri.v1);
-            EmitPackedVertex(tri.v2);
+            EmitPackedVertex(tri.v2);  // Swapped: emit v2 before v1
+            EmitPackedVertex(tri.v1);  // Swapped: emit v1 after v2
         }
         
         // Calculate model-relative base vertex index
@@ -446,11 +450,15 @@ namespace {
         uint32_t firstVertexIdx = static_cast<uint32_t>(ApexLegends::Bsp::collisionVertices.size());
         
         // Emit vertices - 3 per triangle, sequentially
+        // NOTE: We swap v1 and v2 to reverse the winding order!
+        // The game computes normals as (v1-v0) × (v0-v2) = -[(v1-v0) × (v2-v0)]
+        // This is the OPPOSITE of standard CCW winding (v1-v0) × (v2-v0).
+        // By swapping v1/v2, we ensure the game computes the correct normal direction.
         for (int i = 0; i < numTris; i++) {
             const CollisionTri_t& tri = g_collisionTris[triIndices[i]];
             EmitCollisionVertex(tri.v0);
-            EmitCollisionVertex(tri.v1);
-            EmitCollisionVertex(tri.v2);
+            EmitCollisionVertex(tri.v2);  // Swapped: emit v2 before v1
+            EmitCollisionVertex(tri.v1);  // Swapped: emit v1 after v2
         }
         
         // Calculate model-relative vertex index
