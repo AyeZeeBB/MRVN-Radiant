@@ -1030,7 +1030,12 @@ void create_view_menu( QMenuBar *menubar, MainFrame::EViewStyle style ){
 		create_check_menu_item_with_mnemonic( submenu, "Show Crosshair", "ToggleCrosshairs" );
 		create_check_menu_item_with_mnemonic( submenu, "Show Grid", "ToggleGrid" );
 		create_check_menu_item_with_mnemonic( submenu, "Show Blocks", "ShowBlocks" );
-		create_check_menu_item_with_mnemonic( submenu, "Show C&oordinates", "ShowCoordinates" );
+		{
+			QMenu* coordsubmenu = submenu->addMenu( "C&oordinates" );
+			coordsubmenu->setTearOffEnabled( g_Layout_enableDetachableMenus.m_value );
+			create_check_menu_item_with_mnemonic( coordsubmenu, "Show 2D Coordinates", "ShowCoordinates" );
+			create_check_menu_item_with_mnemonic( coordsubmenu, "Show 3D Debug Info", "ShowDebugCoordinates3d" );
+		}
 		create_check_menu_item_with_mnemonic( submenu, "Show Window Outline", "ShowWindowOutline" );
 		create_check_menu_item_with_mnemonic( submenu, "Show Axes", "ShowAxes" );
 		create_check_menu_item_with_mnemonic( submenu, "Show 2D Workzone", "ShowWorkzone2d" );
@@ -1655,6 +1660,7 @@ void MainFrame::Create(){
 		{
 			QToolBar *toolbar = window->addToolBar( "Main Toolbar" );
 			toolbar->setObjectName( "Main Toolbar" );
+			toolbar->setIconSize( QSize( 32, 32 ) );
 			create_main_toolbar( toolbar, CurrentStyle() );
 		}
 		{
@@ -2132,4 +2138,3 @@ void MainFrame_Destroy(){
 	g_patchCount.setCountChangedCallback( Callback() );
 	g_brushCount.setCountChangedCallback( Callback() );
 }
-
