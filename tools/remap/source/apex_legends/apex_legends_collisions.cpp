@@ -86,7 +86,9 @@ namespace {
     }
 
     // Maximum triangles per leaf before splitting
-    constexpr int MAX_TRIS_PER_LEAF = 8;
+    // Using 16 (the format maximum) keeps more adjacent triangles together,
+    // which can help with corner collision detection
+    constexpr int MAX_TRIS_PER_LEAF = 16;
 
     // Maximum depth for BVH tree
     constexpr int MAX_BVH_DEPTH = 32;
@@ -164,6 +166,39 @@ namespace {
     
     // Base vertex index for current model's float collision vertices (bvhFlags=0)
     uint32_t g_modelCollisionVertexBase = 0;
+
+    /*
+        SnapVertexToGrid
+        Snaps a vertex to a fixed grid to eliminate floating point precision issues
+        This ensures that vertices that should be at the same position actually are
+        Grid size of 0.03125 (1/32 unit) provides good precision while preventing cracks
+    */
+    Vector3 SnapVertexToGrid(const Vector3& vert) {
+        constexpr float GRID_SIZE = 0.03125f;  // 1/32 unit grid
+        constexpr float invGrid = 1.0f / GRID_SIZE;
+
+        return Vector3(
+            std::round(vert.x() * invGrid) / invGrid,
+            std::round(vert.y() * invGrid) / invGrid,
+            std::round(vert.z() * invGrid) / invGrid
+        );
+    }
+
+    /*
+        WeldKey - creates a quantized key for vertex welding
+        Vertices within WELD_EPSILON are considered identical
+    */
+    constexpr float WELD_EPSILON = 0.01f;  // 0.01 units tolerance for welding
+    
+    inline std::tuple<int, int, int> MakeWeldKey(const Vector3& v) {
+        // Quantize to grid for consistent hashing
+        constexpr float INV_EPSILON = 1.0f / WELD_EPSILON;
+        return std::make_tuple(
+            static_cast<int>(std::floor(v.x() * INV_EPSILON + 0.5f)),
+            static_cast<int>(std::floor(v.y() * INV_EPSILON + 0.5f)),
+            static_cast<int>(std::floor(v.z() * INV_EPSILON + 0.5f))
+        );
+    }
     
     /*
         EmitPackedVertex
@@ -222,31 +257,50 @@ namespace {
     /*
         PackBoundsToInt16
         Converts float bounds to int16_t format used by Apex BSP
-        The format packs child bounds into [axis][min/max][child] layout
+        
+        From r5sdk CollBvh4Node_t:
+          int16_t minMax[3][2][4];  // [axis][min=0/max=1][child 0-3]
+        
+        In memory (row-major C order):
+          [0-3]   = minMax[0][0][0-3] = X min for children 0-3
+          [4-7]   = minMax[0][1][0-3] = X max for children 0-3
+          [8-11]  = minMax[1][0][0-3] = Y min for children 0-3
+          [12-15] = minMax[1][1][0-3] = Y max for children 0-3
+          [16-19] = minMax[2][0][0-3] = Z min for children 0-3
+          [20-23] = minMax[2][1][0-3] = Z max for children 0-3
+        
+        Layout: [Xmin x4][Xmax x4][Ymin x4][Ymax x4][Zmin x4][Zmax x4]
 
         Game decodes as: worldPos = origin + (int16 * 65536) * scale
         So we encode as: int16 = (worldPos - origin) / (scale * 65536)
     */
     void PackBoundsToInt16(const MinMax bounds[4], int16_t outBounds[24]) {
-        // Layout: bounds[24] = [axis0_min_child0-3][axis0_max_child0-3][axis1_min_child0-3]...
-        // That's: [X_min x4][X_max x4][Y_min x4][Y_max x4][Z_min x4][Z_max x4]
-
-        // The decode multiplier is (scale * 65536), so we divide by that
         float invScaleFactor = 1.0f / (g_bvhScale * 65536.0f);
 
-        for (int axis = 0; axis < 3; axis++) {
-            for (int child = 0; child < 4; child++) {
-                // Convert world coords to encoded int16 values relative to origin
-                float minVal = (bounds[child].mins[axis] - g_bvhOrigin[axis]) * invScaleFactor;
-                float maxVal = (bounds[child].maxs[axis] - g_bvhOrigin[axis]) * invScaleFactor;
+        for (int child = 0; child < 4; child++) {
+            // Convert world coords to encoded int16 values relative to origin
+            float minX = (bounds[child].mins[0] - g_bvhOrigin[0]) * invScaleFactor;
+            float minY = (bounds[child].mins[1] - g_bvhOrigin[1]) * invScaleFactor;
+            float minZ = (bounds[child].mins[2] - g_bvhOrigin[2]) * invScaleFactor;
+            float maxX = (bounds[child].maxs[0] - g_bvhOrigin[0]) * invScaleFactor;
+            float maxY = (bounds[child].maxs[1] - g_bvhOrigin[1]) * invScaleFactor;
+            float maxZ = (bounds[child].maxs[2] - g_bvhOrigin[2]) * invScaleFactor;
 
-                // Clamp to int16 range (conservative: floor for min, ceil for max)
-                minVal = std::clamp(minVal, -32768.0f, 32767.0f);
-                maxVal = std::clamp(maxVal, -32768.0f, 32767.0f);
+            // Clamp to int16 range (conservative: floor for min, ceil for max)
+            minX = std::clamp(minX, -32768.0f, 32767.0f);
+            minY = std::clamp(minY, -32768.0f, 32767.0f);
+            minZ = std::clamp(minZ, -32768.0f, 32767.0f);
+            maxX = std::clamp(maxX, -32768.0f, 32767.0f);
+            maxY = std::clamp(maxY, -32768.0f, 32767.0f);
+            maxZ = std::clamp(maxZ, -32768.0f, 32767.0f);
 
-                outBounds[axis * 8 + child] = static_cast<int16_t>(std::floor(minVal));
-                outBounds[axis * 8 + 4 + child] = static_cast<int16_t>(std::ceil(maxVal));
-            }
+            // Layout: [Xmin x4][Xmax x4][Ymin x4][Ymax x4][Zmin x4][Zmax x4]
+            outBounds[0 + child]  = static_cast<int16_t>(std::floor(minX));  // X min
+            outBounds[4 + child]  = static_cast<int16_t>(std::ceil(maxX));   // X max
+            outBounds[8 + child]  = static_cast<int16_t>(std::floor(minY));  // Y min
+            outBounds[12 + child] = static_cast<int16_t>(std::ceil(maxY));   // Y max
+            outBounds[16 + child] = static_cast<int16_t>(std::floor(minZ));  // Z min
+            outBounds[20 + child] = static_cast<int16_t>(std::ceil(maxZ));   // Z max
         }
     }
 
@@ -262,7 +316,7 @@ namespace {
           - bits 0-10: v0 offset from running base
           - bits 11-19: v1 delta = (v1 - v0 - 1)
           - bits 20-28: v2 delta = (v2 - v0 - 1)
-          - bits 29-31: flags (usually 0)
+          - bits 29-31: edge flags (CRITICAL: must be 7 to test all edges/vertices!)
         
         The game's vertex decode:
           running_base starts as (baseVertex << 10)
@@ -270,6 +324,11 @@ namespace {
           v1_global = v0_global + 1 + v1_delta
           v2_global = v0_global + 1 + v2_delta
           running_base = v0_global (for next triangle)
+          
+        Edge flags control which edges/vertices are tested for collision:
+          edgeMask = 73 * flags (where flags = bits 29-31)
+          flags=0: edgeMask=0, NO edge/vertex tests (corners fail!)
+          flags=7: edgeMask=511, ALL edges/vertices tested
     */
     int EmitPoly3Leaf(const std::vector<int>& triIndices, int surfPropIdx = 0) {
         if (triIndices.empty()) {
@@ -279,8 +338,7 @@ namespace {
         int numTris = std::min((int)triIndices.size(), 16);  // Max 16 tris (4-bit count)
         int leafIndex = ApexLegends::Bsp::bvhLeafDatas.size();
 
-        // First, emit all vertices for this leaf sequentially
-        // The baseVertex will point to where we start adding vertices
+        // Emit all vertices for this leaf sequentially
         uint32_t baseVertexGlobal = static_cast<uint32_t>(ApexLegends::Bsp::packedVertices.size());
         
         // Emit vertices - 3 per triangle, sequentially
@@ -292,21 +350,10 @@ namespace {
         }
         
         // Calculate model-relative base vertex index
-        // The game will compute: running_base = baseVertex << 10
-        // We need baseVertex such that (baseVertex << 10) + our_offsets = actual indices
-        
-        // Since we're laying out vertices sequentially starting at baseVertexGlobal,
-        // and the game expects (baseVertex << 10) to point to our base:
-        // baseVertex = baseVertexGlobal >> 10 (requires alignment!)
-        
-        // For simplicity, we'll use baseVertex = 0 and encode absolute offsets
-        // This works because we control the vertex layout
         uint32_t baseVertexRelative = baseVertexGlobal - g_modelPackedVertexBase;
         
         // The baseVertex stored must satisfy: (baseVertex << 10) <= baseVertexRelative
-        // We'll use the aligned-down value
         uint32_t baseVertexEncoded = baseVertexRelative >> 10;
-        uint32_t baseOffset = baseVertexRelative - (baseVertexEncoded << 10);
         
         // Header: bits 0-11 = surfPropIdx, bits 12-15 = numPolys-1
         uint32_t header = (surfPropIdx & 0xFFF) | (((numTris - 1) & 0xF) << 12);
@@ -315,11 +362,11 @@ namespace {
         ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(headerWord));
         
         // Emit per-triangle vertex index data
-        // running_base starts at (baseVertexEncoded << 10) = baseOffset below our first vertex
+        // running_base starts at (baseVertexEncoded << 10)
         uint32_t running_base = baseVertexEncoded << 10;
         
         for (int i = 0; i < numTris; i++) {
-            // Our vertex layout: tri i uses vertices at baseVertexRelative + i*3, +i*3+1, +i*3+2
+            // Sequential vertex layout: tri i uses vertices at baseVertexRelative + i*3, +i*3+1, +i*3+2
             uint32_t v0_global = baseVertexRelative + i * 3;
             uint32_t v1_global = v0_global + 1;
             uint32_t v2_global = v0_global + 2;
@@ -328,13 +375,21 @@ namespace {
             uint32_t v0_offset = v0_global - running_base;
             
             // v1_delta: v1_global = v0_global + 1 + v1_delta
-            uint32_t v1_delta = v1_global - (v0_global + 1);  // Should be 0
+            uint32_t v1_delta = v1_global - (v0_global + 1);  // Always 0
             
             // v2_delta: v2_global = v0_global + 1 + v2_delta  
-            uint32_t v2_delta = v2_global - (v0_global + 1);  // Should be 1
+            uint32_t v2_delta = v2_global - (v0_global + 1);  // Always 1
             
-            // Pack: bits 0-10 = v0_offset, bits 11-19 = v1_delta, bits 20-28 = v2_delta
-            uint32_t triData = (v0_offset & 0x7FF) | ((v1_delta & 0x1FF) << 11) | ((v2_delta & 0x1FF) << 20);
+            // Edge/vertex collision flags (bits 29-31):
+            // The game uses these bits to control which edges/vertices are tested for collision.
+            // Formula: edgeMask = 73 * flags, where flags = bits 29-31
+            // When flags=0, edgeMask=0, so NO edge/vertex tests happen (collision fails at corners!)
+            // When flags=7, edgeMask=511=0b111111111, so ALL edges/vertices are tested.
+            // For standalone triangles (not sharing edges), we MUST set flags=7.
+            constexpr uint32_t EDGE_FLAGS_TEST_ALL = 7;
+            
+            // Pack: bits 0-10 = v0_offset, bits 11-19 = v1_delta, bits 20-28 = v2_delta, bits 29-31 = edge flags
+            uint32_t triData = (v0_offset & 0x7FF) | ((v1_delta & 0x1FF) << 11) | ((v2_delta & 0x1FF) << 20) | (EDGE_FLAGS_TEST_ALL << 29);
             ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(triData));
             
             // Update running_base to v0 for next triangle
@@ -362,7 +417,7 @@ namespace {
           - bits 0-10:  v0_offset (added to running_base to get v0 index)
           - bits 11-19: v1_delta (v1 = v0 + 1 + v1_delta)
           - bits 20-28: v2_delta (v2 = v0 + 1 + v2_delta)
-          - bits 29-31: flags (unused)
+          - bits 29-31: edge flags (CRITICAL: must be 7 to test all edges/vertices!)
         
         Vertex indexing (from CollLeafHandler_PhysColl_Poly_4_):
           running_base starts at (baseVertex << 10)
@@ -373,6 +428,11 @@ namespace {
             v2_idx = v0_idx + 1 + v2_delta
           Vertices fetched as: verts[v0_idx], verts[v1_idx], verts[v2_idx]
           Where verts is float3 array at 12-byte stride
+          
+        Edge flags control which edges/vertices are tested for collision:
+          edgeMask = 73 * flags (where flags = bits 29-31)
+          flags=0: edgeMask=0, NO edge/vertex tests (corners fail!)
+          flags=7: edgeMask=511, ALL edges/vertices tested
     */
     int EmitTriangleStripLeaf(const std::vector<int>& triIndices, int surfPropIdx = 0) {
         if (triIndices.empty()) {
@@ -397,9 +457,7 @@ namespace {
         uint32_t baseVertexRelative = firstVertexIdx - g_modelCollisionVertexBase;
         
         // The baseVertex stored must satisfy: (baseVertex << 10) points to or before our first vertex
-        // We encode as aligned-down value and track the offset
         uint32_t baseVertexEncoded = baseVertexRelative >> 10;
-        uint32_t initialOffset = baseVertexRelative - (baseVertexEncoded << 10);
         
         // Header: bits 0-11 = surfPropIdx, bits 12-15 = numPolys-1, bits 16-31 = baseVertex
         uint32_t headerWord = (surfPropIdx & 0xFFF) | 
@@ -412,7 +470,7 @@ namespace {
         uint32_t running_base = baseVertexEncoded << 10;
         
         for (int i = 0; i < numTris; i++) {
-            // Our vertex layout: tri i uses vertices at baseVertexRelative + i*3, +i*3+1, +i*3+2
+            // Sequential vertex layout: tri i uses vertices at baseVertexRelative + i*3, +i*3+1, +i*3+2
             uint32_t v0_idx = baseVertexRelative + i * 3;
             uint32_t v1_idx = v0_idx + 1;
             uint32_t v2_idx = v0_idx + 2;
@@ -421,15 +479,21 @@ namespace {
             uint32_t v0_offset = v0_idx - running_base;
             
             // v1_delta: v1_idx = v0_idx + 1 + v1_delta
-            // So: v1_delta = v1_idx - v0_idx - 1 = 1 - 1 = 0
-            uint32_t v1_delta = v1_idx - v0_idx - 1;
+            uint32_t v1_delta = v1_idx - v0_idx - 1;  // Always 0
             
             // v2_delta: v2_idx = v0_idx + 1 + v2_delta
-            // So: v2_delta = v2_idx - v0_idx - 1 = 2 - 1 = 1
-            uint32_t v2_delta = v2_idx - v0_idx - 1;
+            uint32_t v2_delta = v2_idx - v0_idx - 1;  // Always 1
             
-            // Pack: bits 0-10 = v0_offset, bits 11-19 = v1_delta, bits 20-28 = v2_delta
-            uint32_t triData = (v0_offset & 0x7FF) | ((v1_delta & 0x1FF) << 11) | ((v2_delta & 0x1FF) << 20);
+            // Edge/vertex collision flags (bits 29-31):
+            // The game uses these bits to control which edges/vertices are tested for collision.
+            // Formula: edgeMask = 73 * flags, where flags = bits 29-31
+            // When flags=0, edgeMask=0, so NO edge/vertex tests happen (collision fails at corners!)
+            // When flags=7, edgeMask=511=0b111111111, so ALL edges/vertices are tested.
+            // For standalone triangles (not sharing edges), we MUST set flags=7.
+            constexpr uint32_t EDGE_FLAGS_TEST_ALL = 7;
+            
+            // Pack: bits 0-10 = v0_offset, bits 11-19 = v1_delta, bits 20-28 = v2_delta, bits 29-31 = edge flags
+            uint32_t triData = (v0_offset & 0x7FF) | ((v1_delta & 0x1FF) << 11) | ((v2_delta & 0x1FF) << 20) | (EDGE_FLAGS_TEST_ALL << 29);
             ApexLegends::Bsp::bvhLeafDatas.push_back(static_cast<int32_t>(triData));
             
             // Update running_base to v0 for next triangle
@@ -837,23 +901,6 @@ namespace {
     }
 
     /*
-        SnapVertexToGrid
-        Snaps a vertex to a fixed grid to eliminate floating point precision issues
-        This ensures that vertices that should be at the same position actually are
-        Grid size of 0.125 (1/8th unit) provides good precision while preventing cracks
-    */
-    Vector3 SnapVertexToGrid(const Vector3& vert) {
-        constexpr float GRID_SIZE = 0.125f;  // 1/8th unit grid
-        float invGrid = 1.0f / GRID_SIZE;
-
-        return Vector3(
-            std::round(vert.x() * invGrid) / invGrid,
-            std::round(vert.y() * invGrid) / invGrid,
-            std::round(vert.z() * invGrid) / invGrid
-        );
-    }
-
-    /*
         ComputeBoundsForTriangles
         Computes combined AABB for a set of triangles
     */
@@ -1154,9 +1201,11 @@ namespace {
                 totalTris++;
 
                 CollisionTri_t tri;
-                tri.v0 = verts[indices[i]].xyz;
-                tri.v1 = verts[indices[i + 1]].xyz;
-                tri.v2 = verts[indices[i + 2]].xyz;
+                // Snap vertices to grid to ensure shared corners have identical positions
+                // This prevents tiny floating-point gaps at edges/corners
+                tri.v0 = SnapVertexToGrid(verts[indices[i]].xyz);
+                tri.v1 = SnapVertexToGrid(verts[indices[i + 1]].xyz);
+                tri.v2 = SnapVertexToGrid(verts[indices[i + 2]].xyz);
 
                 // Compute normal
                 Vector3 edge1 = tri.v1 - tri.v0;
