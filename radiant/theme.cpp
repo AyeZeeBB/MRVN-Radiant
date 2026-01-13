@@ -33,7 +33,8 @@
 enum class ETheme{
 	Default = 0,
 	Dark,
-	Darker
+	Darker,
+	EvenDarker
 };
 
 static QActionGroup *s_theme_group;
@@ -204,6 +205,33 @@ void theme_set( ETheme theme ){
 
 		qApp->setStyleSheet( sheet );
 	}
+	else if( theme == ETheme::EvenDarker ){
+		qApp->setStyle( "Fusion" );
+		QPalette darkPalette;
+		QColor darkColor = QColor( 30, 30, 30 );
+		QColor disabledColor = QColor( 100, 100, 100 );
+		darkPalette.setColor( QPalette::Window, darkColor );
+		darkPalette.setColor( QPalette::WindowText, Qt::white );
+		darkPalette.setColor( QPalette::Base, QColor( 12, 12, 12 ) );
+		darkPalette.setColor( QPalette::AlternateBase, QColor( 24, 24, 24 ) );
+		darkPalette.setColor( QPalette::ToolTipBase, Qt::white );
+		darkPalette.setColor( QPalette::ToolTipText, Qt::white );
+		darkPalette.setColor( QPalette::Text, Qt::white );
+		darkPalette.setColor( QPalette::Disabled, QPalette::Text, disabledColor );
+		darkPalette.setColor( QPalette::Button, QColor( 36, 36, 36 ) );
+		darkPalette.setColor( QPalette::ButtonText, Qt::white );
+		darkPalette.setColor( QPalette::Disabled, QPalette::ButtonText, disabledColor );
+		darkPalette.setColor( QPalette::BrightText, Qt::red );
+		darkPalette.setColor( QPalette::Link, QColor( 42, 130, 218 ) );
+
+		darkPalette.setColor( QPalette::Highlight, QColor( 42, 130, 218 ) );
+		darkPalette.setColor( QPalette::HighlightedText, Qt::black );
+		darkPalette.setColor( QPalette::Disabled, QPalette::HighlightedText, disabledColor );
+
+		qApp->setPalette( darkPalette );
+
+		qApp->setStyleSheet( sheet );
+	}
 
 	defaults.is1stThemeApplication = false;
 }
@@ -224,6 +252,11 @@ void theme_contruct_menu( class QMenu *menu ){
 	}
 	{
 		auto *a = m->addAction( "Darker" );
+		a->setCheckable( true );
+		group->addAction( a );
+	}
+	{
+		auto *a = m->addAction( "Even Darker" );
 		a->setCheckable( true );
 		group->addAction( a );
 	}

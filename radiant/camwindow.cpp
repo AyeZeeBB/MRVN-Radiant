@@ -50,6 +50,10 @@
 #include "gtkutil/xorrectangle.h"
 #include "gtkutil/fbo.h"
 #include "gtkmisc.h"
+#include "brush.h"
+#include "brushmanip.h"
+#include "patch.h"
+#include "patchmanip.h"
 #include "selection.h"
 #include "mainframe.h"
 #include "preferences.h"
@@ -59,10 +63,14 @@
 #include "renderstate.h"
 
 #include "timer.h"
+#include "stream/textstream.h"
+#include "string/string.h"
 
+#include <QMainWindow>
 #include <QOpenGLWidget>
 
 #include <QApplication>
+#include <set>
 
 // https://stackoverflow.com/questions/42566421/how-to-queue-lambda-function-into-qts-event-loop/42566867#42566867
 template <typename Fun> void postCall( QObject * obj, Fun && fun ) {
@@ -165,6 +173,7 @@ struct camwindow_globals_private_t
 	int m_MSAA = 8;
 	bool m_bShowWorkzone = true;
 	bool m_bShowSize = true;
+	bool m_showDebugCoordinates = false;
 };
 
 camwindow_globals_private_t g_camwindow_globals_private;
@@ -1935,6 +1944,61 @@ void ShowSize3dToggle(){
 	}
 }
 
+ToggleItem g_show_debug_coordinates( BoolExportCaller( g_camwindow_globals_private.m_showDebugCoordinates ) );
+void ShowDebugCoordinatesToggle(){
+	g_camwindow_globals_private.m_showDebugCoordinates ^= 1;
+	g_show_debug_coordinates.update();
+	if ( g_camwnd != 0 ) {
+		CamWnd_Update( *g_camwnd );
+	}
+}
+
+static int debug_overlay_top_inset( const CamWnd& camwnd ){
+	if ( camwnd.m_parent == nullptr || camwnd.m_gl_widget == nullptr ) {
+		return 4;
+	}
+	auto* window = qobject_cast<QMainWindow*>( camwnd.m_parent );
+	if ( window == nullptr ) {
+		return 4;
+	}
+
+	const QPoint widget_top_left = camwnd.m_gl_widget->mapTo( window, QPoint( 0, 0 ) );
+	int overlap = 0;
+	for ( QToolBar* toolbar : window->findChildren<QToolBar*>() ) {
+		if ( !toolbar->isVisible() ) {
+			continue;
+		}
+		if ( window->toolBarArea( toolbar ) != Qt::TopToolBarArea ) {
+			continue;
+		}
+		const QRect rect = toolbar->geometry();
+		overlap = std::max( overlap, rect.bottom() + 1 - widget_top_left.y() );
+	}
+
+	return 24 + std::max( 0, overlap );
+}
+
+static void collect_selected_shaders( std::set<CopiedString>& shaders ){
+	class FaceShaderCollector final : public BrushInstanceVisitor
+	{
+		std::set<CopiedString>& m_shaders;
+	public:
+		explicit FaceShaderCollector( std::set<CopiedString>& shaders ) : m_shaders( shaders ){
+		}
+		void visit( FaceInstance& face ) const override {
+			m_shaders.insert( face.getFace().GetShader() );
+		}
+	};
+
+	FaceShaderCollector face_visitor( shaders );
+	Scene_forEachSelectedBrush( [&face_visitor]( BrushInstance& brush ){
+		brush.forEachFaceInstance( face_visitor );
+	} );
+	Scene_forEachSelectedPatch( [&shaders]( PatchInstance& patch ){
+		shaders.insert( patch.getPatch().GetShader() );
+	} );
+}
+
 void CamWnd::Cam_Draw(){
 //		globalOutputStream() << "Cam_Draw()\n";
 
@@ -2109,6 +2173,68 @@ void CamWnd::Cam_Draw(){
 		gl().glRasterPos3f( 1.0f, static_cast<float>( m_Camera.height ) - GlobalOpenGL().m_font->getPixelHeight(), 0.0f );
 		extern const char* Cull_GetStats();
 		GlobalOpenGL().drawString( Cull_GetStats() );
+	}
+
+	if ( g_camwindow_globals_private.m_showDebugCoordinates ) {
+		const int line_height = GlobalOpenGL().m_font->getPixelHeight();
+		const float start_x = 4.0f;
+		const float start_y = static_cast<float>( debug_overlay_top_inset( *this ) )
+			+ ( g_camwindow_globals.m_showStats ? line_height * 2 : 0 );
+		int line = 0;
+		const float bold_offset = 1.0f;
+
+		const auto draw_line = [&]( const char* text ){
+			gl().glRasterPos3f( start_x, start_y + line_height * line, 0.0f );
+			GlobalOpenGL().drawString( text );
+			gl().glRasterPos3f( start_x + bold_offset, start_y + line_height * line, 0.0f );
+			GlobalOpenGL().drawString( text );
+			++line;
+		};
+
+		const Vector3& cam_origin = m_Camera.origin;
+		const Vector3& cam_angles = m_Camera.angles;
+		draw_line( StringStream<160>(
+			"Cam Pos: ",
+			FloatFormat( cam_origin[0], 7, 1 ), ", ",
+			FloatFormat( cam_origin[1], 7, 1 ), ", ",
+			FloatFormat( cam_origin[2], 7, 1 )
+		) );
+		draw_line( StringStream<160>(
+			"Cam Ang: ",
+			FloatFormat( cam_angles[0], 6, 1 ), ", ",
+			FloatFormat( cam_angles[1], 6, 1 ), ", ",
+			FloatFormat( cam_angles[2], 6, 1 )
+		) );
+
+		const std::size_t selected_count = GlobalSelectionSystem().countSelected();
+		if ( selected_count == 0 ) {
+			draw_line( "Selected: none" );
+		}
+		else {
+			const AABB bounds = GlobalSelectionSystem().getBoundsSelected();
+			draw_line( StringStream<96>( "Selected: ", selected_count ) );
+			draw_line( StringStream<160>(
+				"Object Pos: ",
+				FloatFormat( bounds.origin[0], 7, 1 ), ", ",
+				FloatFormat( bounds.origin[1], 7, 1 ), ", ",
+				FloatFormat( bounds.origin[2], 7, 1 )
+			) );
+		}
+
+		std::set<CopiedString> shaders;
+		collect_selected_shaders( shaders );
+		if ( shaders.empty() ) {
+			draw_line( "Selected Shader: <none>" );
+		}
+		else if ( shaders.size() == 1 ) {
+			draw_line( StringStream<256>( "Selected Shader: ", shaders.begin()->c_str() ) );
+		}
+		else {
+			draw_line( "Selected Shaders:" );
+			for ( const auto& shader : shaders ) {
+				draw_line( StringStream<256>( "- ", shader.c_str() ) );
+			}
+		}
 	}
 
 	// bind back to the default texture so that we don't have problems
@@ -2539,10 +2665,12 @@ void CamWnd_Construct(){
 	GlobalToggles_insert( "ShowStats", FreeCaller<ShowStatsToggle>(), ToggleItem::AddCallbackCaller( g_show_stats ) );
 	GlobalToggles_insert( "ShowWorkzone3d", FreeCaller<ShowWorkzone3dToggle>(), ToggleItem::AddCallbackCaller( g_show_workzone3d ) );
 	GlobalToggles_insert( "ShowSize3d", FreeCaller<ShowSize3dToggle>(), ToggleItem::AddCallbackCaller( g_show_size3d ) );
+	GlobalToggles_insert( "ShowDebugCoordinates3d", FreeCaller<ShowDebugCoordinatesToggle>(), ToggleItem::AddCallbackCaller( g_show_debug_coordinates ) );
 
 	GlobalPreferenceSystem().registerPreference( "ShowStats", BoolImportStringCaller( g_camwindow_globals.m_showStats ), BoolExportStringCaller( g_camwindow_globals.m_showStats ) );
 	GlobalPreferenceSystem().registerPreference( "ShowWorkzone3d", BoolImportStringCaller( g_camwindow_globals_private.m_bShowWorkzone ), BoolExportStringCaller( g_camwindow_globals_private.m_bShowWorkzone ) );
 	GlobalPreferenceSystem().registerPreference( "ShowSize3d", BoolImportStringCaller( g_camwindow_globals_private.m_bShowSize ), BoolExportStringCaller( g_camwindow_globals_private.m_bShowSize ) );
+	GlobalPreferenceSystem().registerPreference( "ShowDebugCoordinates3d", BoolImportStringCaller( g_camwindow_globals_private.m_showDebugCoordinates ), BoolExportStringCaller( g_camwindow_globals_private.m_showDebugCoordinates ) );
 	GlobalPreferenceSystem().registerPreference( "CamMoveSpeed", IntImportStringCaller( g_camwindow_globals_private.m_nMoveSpeed ), IntExportStringCaller( g_camwindow_globals_private.m_nMoveSpeed ) );
 	GlobalPreferenceSystem().registerPreference( "CamMoveTimeToMaxSpeed", IntImportStringCaller( g_camwindow_globals_private.m_time_toMaxSpeed ), IntExportStringCaller( g_camwindow_globals_private.m_time_toMaxSpeed ) );
 	GlobalPreferenceSystem().registerPreference( "ScrollMoveSpeed", IntImportStringCaller( g_camwindow_globals_private.m_nScrollMoveSpeed ), IntExportStringCaller( g_camwindow_globals_private.m_nScrollMoveSpeed ) );
